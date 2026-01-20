@@ -1,0 +1,2 @@
+docker build -t game-backend .
+docker run -it --rm game-backend
