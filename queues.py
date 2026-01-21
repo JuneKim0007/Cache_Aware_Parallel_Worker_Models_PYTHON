@@ -92,18 +92,19 @@ class LocalTaskQueue:
         return self._config
 
     #since object is allocated, just put the value
-    def enqueue(self, task_id: int):
-        state = self._state
-        slots = self.slots
+    def enqueue(self, slot):
+        state =self._state
+        slots =self.slots
 
         tail = state.tail
-        next_tail = (tail + 1) & state.mask
+        next_tail = (tail +1) &state.mask
 
-        if next_tail == state.head:
+        if next_tail ==state.head:
             raise RuntimeError("Queue full")
+        #just copy everything from the given slot
+        ctypes.memmove(ctypes.byref(slots[tail]), ctypes.byref(slot),ctypes.sizeof(slot))
 
-        slots[tail].task_id = task_id
-        state.tail = next_tail
+        state.tail =next_tail
 
     #Security is not a concern no need to zerorize
     def dequeue(self) -> int:
@@ -129,6 +130,25 @@ class LocalTaskQueue:
     def count(self) -> int:
         s = self._state
         return (s.tail - s.head) &s.mask
+    
+    def __str__(self):
+        state = self._state
+        info=[
+            f"[LOCAL TASK QUEUE]"
+            f"num_slots={self.num_slots}",
+            f"head={state.head}, tail={state.tail}, count={self.count()}",
+            f"full={self.is_full()}, empty={self.is_empty()}",
+        ]
+
+        tasks = []
+        #print ten right now
+        for i in range(10):
+            idx = (state.head + i)& state.mask
+            slot = self.slots[idx]
+            tasks.append(f"idx={idx}: tsk_id={slot.tsk_id}, fn_id={slot.fn_id}")
+
+
+        return "\n".join(info)
 
 # ============================================================
 # SharedTaskQueue with identical structure style to LocalTaskQueue
@@ -183,15 +203,24 @@ class SharedTaskQueue:
         slots =self.slots
 
         tail =state.tail
-        next_tail = (tail + 1) & state.mask
+        next_tail = (tail +1) &state.mask
 
         if next_tail == state.head:
             raise RuntimeError("Queue full")
 
-        slots[tail].tsk_id = tsk_id
-        slots[tail].fn_id = fn_id
-        slots[tail].args = args
-        slots[tail].meta = meta 
+        slot = slots[tail]
+
+        # write payload (private, not yet published)
+        slot.tsk_id = tsk_id
+        slot.fn_id  = fn_id
+
+        #I just found memmove and it bypass python typechecking!
+        #bench marking has shown that this is like 2~3x faster
+        #but it does create a temp slot but its a tiny object and is already aligend soo
+
+        ctypes.memmove(ctypes.byref(slot.args),args,16)
+        ctypes.memmove(ctypes.byref(slot.meta),meta,40)
+
         state.tail = next_tail
 
 
@@ -231,12 +260,11 @@ class SharedTaskQueue:
 
         tasks = []
         #print ten right now
-        for i in range(10):
+        for i in range(0,10):
             idx = (state.head + i)& state.mask
             slot = self.slots[idx]
             tasks.append(f"idx={idx}: tsk_id={slot.tsk_id}, fn_id={slot.fn_id}")
-
-
+        info.extend(tasks)
         return "\n".join(info)
 
 
@@ -265,9 +293,14 @@ def enqueue_testing():
     meta = MetaArray()
     c.enqueue(1,2,
               arg1,meta)
-    print(c)
+    return(c,d)
+def copy_testing():
+    a,b = enqueue_testing ()
+    print(a)
+    b.enqueue(a.slots[0])
+    print(b)
     
-
 if __name__ == "__main__":
     #alloc_testing()
-    enqueue_testing()
+    #enqueue_testing()
+    copy_testing()
