@@ -1,222 +1,273 @@
 import ctypes
 from enum import IntEnum
-from slot import Slot
-
+from slot import TaskSlot128
+import threading
 
 #============================================================
 # QUEUE TYPE
-# Classification of Queue's Role
-# similar to '#DEFINE KEY VALUE' in C
-# <EVERYTHING IS INDEEN AN OBJECT IN PYTHON>
 #============================================================
-from enum import IntEnum
-
-class QueueType(IntEnum):
-    """
-    Queue Type Registry. 
-    User Types (0x0100+):
-        Available for custom queue types
-    Queue Types FROM 0x000 TO 0x0ff are RESERVED.
-    To add custom types:
-
-        QueueType.<MY_CUSTOM> = 0x0100
-        or
-        class MyTypes(QueueType):
-            PRIORITY = 0x0100
-        or 
-        QueueType.register(cls, name, value)
-            Refer to QueueType.register()
-    """
+class ProcQueueTypes(IntEnum):
     TASK_DISTRIBUTE = 0x0000
-    TASK_DISPATCH   = 0x0001
-    L2_BATCH        = 0x0002
-    L3_IO           = 0x0003
-    
-    _USER_START = 0x0100
-    
-    #maybe in the future i can add args and kargs for convinent implementation.
-    @classmethod
-    def register_user_type(cls, name: str, value: int | None = None):
-        """
-        A function to register a new custom queue type.
-    
-        Args:
-            cls: Class object to add a type mapping.
-            name: Type name. 
-            value: Type ID (must be >= 0x0100), or leave it for auto assigning.
-        
-        Returns:
-            The assigned type ID
-        
-        Example:
-            QueueType.register_user_type('MY_QUEUE')  # Auto-assigns
-            QueueType.register_user_type('CUSTOM', 0x0150)
-        """
-        if value is None:
-            # Auto-assign with attacing 0x100 since it auto() may invade reserved area
-            existing = [v for v in cls.__members__.values() if v >= cls._USER_START]
-            value=max(existing, default=cls._USER_START- 1)+ 1
-        
-        if value < cls._USER_START:
-            raise ValueError(f"[VALUE ERR] Expected type {name} must have value >= {cls._USER_START:#06x}, got {value:#06x}")
-        
-        if name in cls.__members__:
-            raise ValueError(f"Queue type {name} already exists")
-        
-        cls._member_map_[name] = value
-        cls._value2member_map_[value] = cls._member_map_[name]
-        
-        return value
+    TASK_DISPATCH = 0x0101  # Added as example for LocalTaskQueue
 
+_QUEUE_TYPE_USER_START = 0x0100
+QueueTypes = {}
+
+def register_queue_type(name: str, value: int):
+    if value < _QUEUE_TYPE_USER_START:
+        raise ValueError(f"User types must be >= {_QUEUE_TYPE_USER_START:#04x}")
+    if value in QueueTypes.values():
+        raise ValueError(f"Queue type value {value:#04x} already registered")
+    if name in QueueTypes:
+        raise ValueError(f"Queue type name '{name}' already registered")
+    QueueTypes[name] = value
+    return value
 
 #============================================================
 # QUEUE CONFIG
-# COLD EXTERNAL STATE
-# Metadata (SOURCE OF TRUTH)
 #============================================================
-
 class QueueConfig(ctypes.Structure):
-    '''
-    SOURCE OF TRUTH
-    Often only to be explictly called. (Almost no internal access)
-    Mainly for adminstrating, debugging purpose.
-    '''
     _fields_ = [
-        ("size", ctypes.c_uint32),        # number of slots
-        ("slot_size", ctypes.c_uint32),   # sizeof(Slot)
+        ("num_slots", ctypes.c_uint32),      # renamed size -> num_slots
+        ("slot_size", ctypes.c_uint32),
         ("queue_type", ctypes.c_uint32),
     ]
 
-
 #============================================================
-# HOT, INTERNAL STATE (CURSOR)
+# QUEUE STATE
 #============================================================
 class QueueState:
-    '''
-    DO NOT MODIFY VALUES UNLESS YOU KNOW WHAT YOU ARE DOING
-    THOSE VARIABLES ARE FOR INTERNAL ACCSSE ONLY.
-    Head: the first valid index of an array of Slot
-    Tail: the last valid index
-    size: the number of slots
-    '''
-    __slots__ = ("head", "tail", "_size", "mask")
-
-    def __init__(self, size: int):
+    __slots__ = ("head", "tail", "_num_slots", "mask")
+    def __init__(self, num_slots: int):
         self.head = 0
         self.tail = 0
-        self._size = size          # number of slots (fixed)
-        self.mask = size - 1       # for fast wraparound
+        self._num_slots = num_slots
+        self.mask = num_slots - 1
 
-    #capacity should be immutable.
-    #this property setter might not needed with careful coding. Just a safeguard.
     @property
-    def size(self) -> int:
-        return self._size
-
+    def num_slots(self) -> int:
+        return self._num_slots
 
 # ============================================================
 # Cache-aware Single-Producer / Single-Consumer Queue
 # ============================================================
 class LocalTaskQueue:
-    #docstring
-    """
-    Lock-free, Circular Queue 'local' to assigned workers for task-requests managing.
-    Single producer and consumer model.
-    HOT variables: Variables that are frequently accessed.  
-        _state: Refers to a QueueState instance [head, tail, size]
-        slots: Refers to an array of Slots
-    COLD variables : Variables that are not frequently accessed. Often only accessed if EXPLICITLY called
-        _config: Refers to a QueueType instance [size, slot_size, queue_type]
-        _raw_buffer: PLACE HOLDER VALUES FOR MEMORY ALLOCATION, DO NOT MODIFY THIS
-
-    Memory Layout:
-        Slots aligned to 64-byte cache line boundaries
-        Base slot size: 192 bytes (3 * 64-byte cache lines) for Cache-line awareness
-        Contiguous allocation for locality and faster access.
-    DESINING RATIONALE:
-        AVOID USING Ctypes unless needed to stay "HOT" in L1/L2 Cache.
-        Other less frequent datas not necessarily needed to stay "Hot" will be of __slot__ class to avoid Python overhead.
-    """
-    
-    
     __slots__ = (
-        "_state",           # HOT: Frequently accessed variables
+        "_state",
         "_slots_base",
         "slots",
-        "_config",          # COLD: those data won't be accessed unless EXPLICITLY called ostly for Layout
+        "_config",
         "_raw_buffer",
     )
-    #JUST FOR THE VISIBILITY, MAYBE I SHOULD MAKE size : int = 128. 
-    DEFAULT_SIZE = 128  # DEFAULT SIZE MUST BE POWER OF TWO
+    DEFAULT_NUM_SLOTS = 256  # must be power of two
 
-    def __init__(self, size: int | None = None,
-                 qtype: QueueType = QueueType.TASK_DISPATCH):
-
-        size = size or self.DEFAULT_SIZE
-        if size & (size - 1) != 0:
-            raise ValueError("Queue size must be power of two")
-
-        #COLD
+    def __init__(self, num_slots: int | None = None,
+                 slot = TaskSlot128,
+                 qtype: ProcQueueTypes = ProcQueueTypes.TASK_DISPATCH):
+        
+        num_slots = num_slots or self.DEFAULT_NUM_SLOTS
         self._config = QueueConfig(
-            size=size,
-            slot_size=ctypes.sizeof(Slot),
+            num_slots=num_slots,
+            slot_size=ctypes.sizeof(slot),
             queue_type=qtype,
         )
+        raw_bytes =num_slots * self._config.slot_size+ 63
+        self._raw_buffer = ctypes.create_string_buffer(raw_bytes)
+        raw_addr =ctypes.addressof(self._raw_buffer)
+        self._slots_base = (raw_addr + 63)& ~63
 
-        #PLACE HOLDER FOR MEMORY LAYOUT
-        raw_bytes = size* self._config.slot_size+ 63
-        self._raw_buffer= ctypes.create_string_buffer(raw_bytes)
-        raw_addr = ctypes.addressof(self._raw_buffer)
-        self._slots_base= (raw_addr + 63)&~63  # 64B alignment
-
-        SlotArray = Slot* size
+        SlotArray =TaskSlot128 *num_slots
         self.slots =SlotArray.from_address(self._slots_base)
 
-        self._state =QueueState(size)
+        self._state = QueueState(num_slots)
 
-    #Not really necessary but for safe guarding
-    @property
-    def size(self) -> int:
-        return self._config.size
+        print(f"[QUEUE][LOCAL][INITIALIZED] onto Worker 'workerID' on 'TS'")
 
     @property
-    def layout(self) -> QueueConfig:
+    def num_slots(self) -> int:
+        return self._config.num_slots
+
+    @property
+    def config(self) -> QueueConfig:
         return self._config
 
-    #UTILITY FUNCTIONS
+    #since object is allocated, just put the value
     def enqueue(self, task_id: int):
         state = self._state
         slots = self.slots
 
-        tail =state.tail
-        next_tail = (tail + 1) &state.mask
+        tail = state.tail
+        next_tail = (tail + 1) & state.mask
 
-        if next_tail== state.head:
+        if next_tail == state.head:
             raise RuntimeError("Queue full")
 
         slots[tail].task_id = task_id
         state.tail = next_tail
 
-    def dequeue(self)-> int:
-        state =self._state
-        slots =self.slots
+    #Security is not a concern no need to zerorize
+    def dequeue(self) -> int:
+        state = self._state
+        slots = self.slots
 
-        head =state.head
-        if head ==state.tail:
+        head = state.head
+        if head == state.tail:
             raise RuntimeError("Queue empty")
 
         task_id = slots[head].task_id
-        state.head =(head +1) & state.mask
+        state.head = (head + 1) &state.mask
         return task_id
 
     def is_empty(self) -> bool:
         s = self._state
-        return s.head ==s.tail
+        return s.head == s.tail
 
     def is_full(self) -> bool:
         s = self._state
-        return ((s.tail+ 1) &s.mask) ==s.head
+        return ((s.tail + 1) & s.mask) ==s.head
 
     def count(self) -> int:
         s = self._state
-        return (s.tail -s.head) &s.mask
+        return (s.tail - s.head) &s.mask
+
+# ============================================================
+# SharedTaskQueue with identical structure style to LocalTaskQueue
+# ============================================================
+class SharedTaskQueue:
+    '''
+    queue_id : int
+    num_slots: int
+    RIGHT NOW Slot is predifned manually
+    '''
+    def __init__(self, queue_id : int, num_slots: int):
+
+        self._config = QueueConfig(
+            num_slots=num_slots,
+            slot_size=ctypes.sizeof(TaskSlot128),
+            queue_type=ProcQueueTypes.TASK_DISTRIBUTE,
+        )
+
+        self.queue_id = queue_id
+        raw_bytes = num_slots * self._config.slot_size +63
+        self._raw_buffer = ctypes.create_string_buffer(raw_bytes)
+        raw_addr = ctypes.addressof(self._raw_buffer)
+        self._slots_base = (raw_addr + 63) &~63
+
+        SlotArray = TaskSlot128 * num_slots
+        self.slots = SlotArray.from_address(self._slots_base)
+
+        self._state = QueueState(num_slots)
+        self.lock = threading.Lock()
+        print(f"[QUEUE][SHARED][INITIALIZED] queue_id = {self.queue_id} on 'TS'")
+
+    @property
+    def num_slots(self) -> int:
+        return self._config.num_slots
+    @property
+    def config(self) -> QueueConfig:
+        return self._config
+
+    def enqueue(
+        self, fn_id: int, tsk_id: int,
+        args, #ARGS MUST BE C_uint64 type!
+        meta  #META MUST BE C_uint8 *40 type!
+    ):
+        '''
+        For 64 byte
+        ("tsk_id", ctypes.c_uint32),           # 4 bytes
+        ("fn_id", ctypes.c_uint32),          # 4 bytes
+        ("args", ctypes.c_uint64 * 2),        # 16 bytes generic args
+        ("meta", ctypes.c_uint8 * 40),        # 40 bytes auxiliary data
+        '''
+        state =self._state
+        slots =self.slots
+
+        tail =state.tail
+        next_tail = (tail + 1) & state.mask
+
+        if next_tail == state.head:
+            raise RuntimeError("Queue full")
+
+        slots[tail].tsk_id = tsk_id
+        slots[tail].fn_id = fn_id
+        slots[tail].args = args
+        slots[tail].meta = meta 
+        state.tail = next_tail
+
+
+    #RIGHT NOW JUST COPY AND PASTED TO BE IMPLEMENTED ACCORDINLGLY 
+    def dequeue(self):
+        state = self._state
+        slots = self.slots
+
+        head = state.head
+        if head == state.tail:
+            raise RuntimeError("Queue empty")
+
+        task_id = slots[head].task_id
+        state.head = (head + 1) &state.mask
+        return task_id
+
+    def is_empty(self) -> bool:
+        s = self._state
+        return s.head == s.tail
+
+    def is_full(self) -> bool:
+        s = self._state
+        return ((s.tail + 1) & s.mask) == s.head
+
+    def count(self) -> int:
+        s = self._state
+        return (s.tail - s.head) & s.mask
+    
+    def __str__(self):
+        state = self._state
+        info=[
+            f"[SharedTaskQueue] queue_id={self.queue_id}",
+            f"num_slots={self.num_slots}",
+            f"head={state.head}, tail={state.tail}, count={self.count()}",
+            f"full={self.is_full()}, empty={self.is_empty()}",
+        ]
+
+        tasks = []
+        #print ten right now
+        for i in range(10):
+            idx = (state.head + i)& state.mask
+            slot = self.slots[idx]
+            tasks.append(f"idx={idx}: tsk_id={slot.tsk_id}, fn_id={slot.fn_id}")
+
+
+        return "\n".join(info)
+
+
+#
+#
+#
+#
+#
+#FOR TESTING QUEUE
+#
+#
+def alloc_testing() -> tuple:
+    a = SharedTaskQueue(1,128)
+    b = LocalTaskQueue()
+    return (a,b)
+
+#alloc has to be successful anyway
+def enqueue_testing():
+    c, d = alloc_testing()
+    ArgArray2 = ctypes.c_uint64 * 2
+    arg1 = ctypes.c_uint64 * 2
+    arg1 = ArgArray2()
+    arg1[0] = 123
+    arg1[1] = 456
+    MetaArray = ctypes.c_uint8 * 40
+    meta = MetaArray()
+    c.enqueue(1,2,
+              arg1,meta)
+    print(c)
+    
+
+if __name__ == "__main__":
+    #alloc_testing()
+    enqueue_testing()
