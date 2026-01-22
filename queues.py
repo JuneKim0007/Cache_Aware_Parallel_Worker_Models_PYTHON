@@ -3,6 +3,14 @@ from enum import IntEnum
 from slot import TaskSlot128
 import threading
 
+
+#
+#
+#
+#
+#
+#
+
 #============================================================
 # QUEUE TYPE
 #============================================================
@@ -28,25 +36,49 @@ def register_queue_type(name: str, value: int):
 #============================================================
 class QueueConfig(ctypes.Structure):
     _fields_ = [
-        ("num_slots", ctypes.c_uint32),      # renamed size -> num_slots
+        ("_num_slots", ctypes.c_uint32),      # renamed size -> _num_slots
         ("slot_size", ctypes.c_uint32),
         ("queue_type", ctypes.c_uint32),
+        ("num_workers", ctypes.c_uint8)
     ]
 
 #============================================================
 # QUEUE STATE
 #============================================================
 class QueueState:
-    __slots__ = ("head", "tail", "_num_slots", "mask")
-    def __init__(self, num_slots: int):
+    '''
+    head: start idx for occupied slots
+    tail: tail idx for occupied slots
+    _num_slots: number of all slots regardless of their state
+    curr_size: number of occupoed slots
+    mask: used for quicker modular arthimetic
+    _batch_list: internal variable to indicate which worker is participating in batching.
+    '''
+    __slots__ = ("head", "tail", "_num_slots", "curr_size", "mask", "_batch_list")
+    def __init__(self, _num_slots: int):
         self.head = 0
         self.tail = 0
-        self._num_slots = num_slots
-        self.mask = num_slots - 1
+        self._num_slots = _num_slots
+        #curr_size represents number of occupied slots
+        #mostly helps queue limit checking
+        self.curr_size = 0
+        self.mask = _num_slots - 1
 
-    @property
-    def num_slots(self) -> int:
-        return self._num_slots
+        #each time batch is requested, worker
+        #mitigation plan is to have a worker that signals once batch_list ==0
+        '''
+        self._batch_list : Each time worker batches task, it flips ith bit (i is the determined by internal worker_id) to 1 and 
+        mark itself's internal variable, _batch_ref = 1.
+        whenever worker tries to batch but its _batch_ref = 1, it returns immediately and do other tasks.
+        this is to avoid putting too much burden on a shared producer(scheduling) queue.
+        in the future, to mitigate problem with a single shared queue with many workers, scheduler_worker will be introduced.
+        However, I recommend to create multiple shared queues with each having a distinct set of dedicated workers.
+            For instance:
+                Queue1 has {0,1,2,3,4,5,6,7} workers
+                Queue2 has {8,...15} workers and so on.
+        '''
+        self._batch_list = ctypes.c_uint64
+
 
 # ============================================================
 # Cache-aware Single-Producer / Single-Consumer Queue
@@ -61,31 +93,28 @@ class LocalTaskQueue:
     )
     DEFAULT_NUM_SLOTS = 256  # must be power of two
 
-    def __init__(self, num_slots: int | None = None,
+    def __init__(self, _num_slots: int | None = None,
                  slot = TaskSlot128,
                  qtype: ProcQueueTypes = ProcQueueTypes.TASK_DISPATCH):
         
-        num_slots = num_slots or self.DEFAULT_NUM_SLOTS
+        _num_slots = _num_slots or self.DEFAULT_NUM_SLOTS
         self._config = QueueConfig(
-            num_slots=num_slots,
+            _num_slots=_num_slots,
             slot_size=ctypes.sizeof(slot),
             queue_type=qtype,
+            num_workers = 1
         )
-        raw_bytes =num_slots * self._config.slot_size+ 63
+        raw_bytes =_num_slots * self._config.slot_size+ 63
         self._raw_buffer = ctypes.create_string_buffer(raw_bytes)
         raw_addr =ctypes.addressof(self._raw_buffer)
         self._slots_base = (raw_addr + 63)& ~63
 
-        SlotArray =TaskSlot128 *num_slots
+        SlotArray =TaskSlot128 *_num_slots
         self.slots =SlotArray.from_address(self._slots_base)
 
-        self._state = QueueState(num_slots)
+        self._state = QueueState(_num_slots)
 
         print(f"[QUEUE][LOCAL][INITIALIZED] onto Worker 'workerID' on 'TS'")
-
-    @property
-    def num_slots(self) -> int:
-        return self._config.num_slots
 
     @property
     def config(self) -> QueueConfig:
@@ -98,8 +127,9 @@ class LocalTaskQueue:
 
         tail = state.tail
         next_tail = (tail +1) &state.mask
-
-        if next_tail ==state.head:
+        
+        available_slots = self._state._num_slots - self._state.curr_size 
+        if available_slots < 1:
             raise RuntimeError("Queue full")
         #just copy everything from the given slot
         ctypes.memmove(ctypes.byref(slots[tail]), ctypes.byref(slot),ctypes.sizeof(slot))
@@ -119,6 +149,38 @@ class LocalTaskQueue:
         state.head = (head + 1) &state.mask
         return task_id
 
+    #this takes count as an argument and copies count * slots at once using memmove.
+    # benchmarking needed to figure out the speed
+    # Batch_enqueue needs a bit more logic to handle failure
+    #   1: flatenning head and tail to check the avaialble slots
+    #   2: if count > available slot, we have to readjust the slots.
+    #       2: count will be adjusted by the worker calcuating batch
+    #           a bit unsafe tho.
+    def batch_enqueue(self, count, slot):
+        '''
+        count: number of slots to copy
+        slot: has to be the first slot
+        '''
+        state =self._state
+        slots =self.slots
+
+        tail = state.tail
+        next_tail = (tail +count) &state.mask
+
+        available_slots = self._state._num_slots - self._state.curr_size 
+        #RIGHT NOW IT JUST REJECTS THE WHOLE
+        #but in the future, it will try to fetch the maximum possible slots
+        if available_slots < count:
+            raise RuntimeError(f"[ERROR][Queue][Local] onto Worker 'workerid' - Queue full")
+        #just copy everything from the given slot
+        ctypes.memmove(ctypes.byref(slots[tail]), ctypes.byref(slot),ctypes.sizeof(slot) * count)
+        state.tail =next_tail
+
+
+
+    #
+    #   UTILS
+    #
     def is_empty(self) -> bool:
         s = self._state
         return s.head == s.tail
@@ -135,7 +197,7 @@ class LocalTaskQueue:
         state = self._state
         info=[
             f"[LOCAL TASK QUEUE]"
-            f"num_slots={self.num_slots}",
+            f"_num_slots={self._num_slots}",
             f"head={state.head}, tail={state.tail}, count={self.count()}",
             f"full={self.is_full()}, empty={self.is_empty()}",
         ]
@@ -147,7 +209,7 @@ class LocalTaskQueue:
             slot = self.slots[idx]
             tasks.append(f"idx={idx}: tsk_id={slot.tsk_id}, fn_id={slot.fn_id}")
 
-
+        info.extend(tasks)
         return "\n".join(info)
 
 # ============================================================
@@ -156,33 +218,34 @@ class LocalTaskQueue:
 class SharedTaskQueue:
     '''
     queue_id : int
-    num_slots: int
+    _num_slots: int
     RIGHT NOW Slot is predifned manually
     '''
-    def __init__(self, queue_id : int, num_slots: int):
+    def __init__(self, queue_id : int, _num_slots: int, num_workers: int):
 
         self._config = QueueConfig(
-            num_slots=num_slots,
+            _num_slots=_num_slots,
             slot_size=ctypes.sizeof(TaskSlot128),
             queue_type=ProcQueueTypes.TASK_DISTRIBUTE,
+            num_workers = num_workers
         )
 
         self.queue_id = queue_id
-        raw_bytes = num_slots * self._config.slot_size +63
+        raw_bytes = _num_slots * self._config.slot_size +63
         self._raw_buffer = ctypes.create_string_buffer(raw_bytes)
         raw_addr = ctypes.addressof(self._raw_buffer)
         self._slots_base = (raw_addr + 63) &~63
 
-        SlotArray = TaskSlot128 * num_slots
+        SlotArray = TaskSlot128 * _num_slots
         self.slots = SlotArray.from_address(self._slots_base)
 
-        self._state = QueueState(num_slots)
+        self._state = QueueState(_num_slots)
         self.lock = threading.Lock()
         print(f"[QUEUE][SHARED][INITIALIZED] queue_id = {self.queue_id} on 'TS'")
 
     @property
-    def num_slots(self) -> int:
-        return self._config.num_slots
+    def _num_slots(self) -> int:
+        return self._config._num_slots
     @property
     def config(self) -> QueueConfig:
         return self._config
@@ -206,7 +269,7 @@ class SharedTaskQueue:
         next_tail = (tail +1) &state.mask
 
         if next_tail == state.head:
-            raise RuntimeError("Queue full")
+            raise RuntimeError(f"[Queue][Shared][ERROR] Queue Id: {self.queue_id}- Queue full")
 
         slot = slots[tail]
 
@@ -253,7 +316,7 @@ class SharedTaskQueue:
         state = self._state
         info=[
             f"[SharedTaskQueue] queue_id={self.queue_id}",
-            f"num_slots={self.num_slots}",
+            f"_num_slots={self._num_slots}",
             f"head={state.head}, tail={state.tail}, count={self.count()}",
             f"full={self.is_full()}, empty={self.is_empty()}",
         ]
@@ -277,30 +340,45 @@ class SharedTaskQueue:
 #
 #
 def alloc_testing() -> tuple:
-    a = SharedTaskQueue(1,128)
+    a = SharedTaskQueue(1,128, 1)
     b = LocalTaskQueue()
     return (a,b)
 
 #alloc has to be successful anyway
 def enqueue_testing():
     c, d = alloc_testing()
-    ArgArray2 = ctypes.c_uint64 * 2
-    arg1 = ctypes.c_uint64 * 2
-    arg1 = ArgArray2()
-    arg1[0] = 123
-    arg1[1] = 456
-    MetaArray = ctypes.c_uint8 * 40
-    meta = MetaArray()
-    c.enqueue(1,2,
-              arg1,meta)
+    for i in range (0,10):
+        ArgArray2 = ctypes.c_uint64 * 2
+        arg1 = ctypes.c_uint64 * 2
+        arg1 = ArgArray2()
+        arg1[0] = 1*i
+        arg1[1] = 3*i
+        MetaArray = ctypes.c_uint8 * 40
+        meta = MetaArray()
+        c.enqueue(i,i+1,
+                arg1,meta)
     return(c,d)
 def copy_testing():
     a,b = enqueue_testing ()
     print(a)
+    #individual enqueue
     b.enqueue(a.slots[0])
+    # batch enqueue
+    b.batch_enqueue(310,a.slots[0])
     print(b)
     
+import time
+
+start = time.perf_counter()
 if __name__ == "__main__":
     #alloc_testing()
     #enqueue_testing()
-    copy_testing()
+
+    start = time.perf_counter()
+    try:
+        copy_testing()
+    except RuntimeError as e:
+        print(f"err{e}")
+        pass
+    end = time.perf_counter()
+    print(f"Elapsed: {end - start:.6f} seconds")
