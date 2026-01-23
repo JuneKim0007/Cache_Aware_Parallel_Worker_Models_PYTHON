@@ -50,25 +50,12 @@ class Worker:
     def process(self, task: TaskSlot128):
         return
     
-    #============================================================
-    #Batch Logic
-    # It takes the Lock then looks up the cursor (meta data) for the 
-    # Shared schedule Queue; 
-    # 
-    # //Scheduler Logic NOT IMPLEMENTED
-    # 
-    #============================================================
     def claim_batch(self, batch_size: int):
         """
         Worker claims a batch of tasks atomically.
         Only marks boundaries for a quicker Lock release.
         """
 
-        #
-        #TO-DO: 
-        #       as long as at least one job fetch is possible, 
-        #       fetch as much as possible within the limit
-        #
         available_slots = (self.LocalTaskQueue._state._num_slots
                             - self.LocalTaskQueue._state.curr_size)
         available_slots = min(available_slots, batch_size)
@@ -129,27 +116,4 @@ class IOWorker:
         pass
     def log(self):
         pass
-
-'''
-from multiprocessing import Process
-import queues
-
-def create_worker_pool(shared queue):
-    cpu = Worker() //takes shared queue
-    io = IOWorker()
-    cpu.run()
-    io.run()
-
-    processes = []
-    for i in range(4):
-        p = Process(target=create_worker_pool)
-        p.start()
-        processes.append(p)
-
-    for p in processes:
-        p.join()
-
-    print("GRACEFUL TERIMINATION on 'ts'")
-
-'''
             
