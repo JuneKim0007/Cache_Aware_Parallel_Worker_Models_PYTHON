@@ -1,17 +1,25 @@
 import time
 from queues import LocalTaskQueue, SharedTaskQueue
 from slot import TaskSlot128
+import ctypes
 
+
+
+##
+#   TODO: REFACTORING
+#
+#
 
 class Worker:
-    def __init__(self, shared_queue: SharedTaskQueue, worker_id: int, num_task_slot:int = 128):
-        #it takes config to automatically load slot size and allocate a local task queue
-        #accordingly right now not implemented.
-        self.shared_queue._config = shared_queue._config
+    def __init__(self, shared_queue: SharedTaskQueue, worker_id: int, _worker_internal_id: int, num_task_slot:int = 128):
+
+        self.shared_queue = shared_queue #create a referer
         self.worker_id = worker_id
 
-        # create local queue with fixed num_slots=128
-        #Need to 
+        #Internally they will be sequential from 0 to num_workers.
+        #this is to control the bitmap,
+        #TODO: above.
+        self._worker_id = _worker_internal_id
         self.LocalTaskQueue = LocalTaskQueue(num_task_slot)
 
         self.completed_tasks = 0
@@ -55,28 +63,93 @@ class Worker:
         Worker claims a batch of tasks atomically.
         Only marks boundaries for a quicker Lock release.
         """
+
+        #
+        #TO-DO: 
+        #       as long as at least one job fetch is possible, 
+        #       fetch as much as possible within the limit
+        #
+        available_slots = (self.LocalTaskQueue._state._num_slots
+                            - self.LocalTaskQueue._state.curr_size)
+        available_slots = min(available_slots, batch_size)
+        if available_slots <1: return
+
+
+
+        #Flip the bit in the bitmap
+        bm = self.shared_queue._state._batch_bitmap.value
+        bm |= (1 << self._worker_id)
+        self.shared_queue._state._batch_bitmap.value = bm
+
         with self.shared_queue.lock: 
-            available = min(self.shared_queue.available_count(), batch_size)
-            if available == 0:
+            #if no more task to fetch
+            if self.shared_queue._state.head == self.shared_queue._state.tail:
+                #Undo the bitmap fliping
+                bm ^= (1 << self._worker_id)
+                self.shared_queue._state._batch_bitmap.value = bm
                 return
-                
+        
+            self.shared_queue._state._batch_accumulation += batch_size
+
             # Mark the batch as claimed (update head cursor / metadata)
-            self.batch_head =self.self.shared_queue._state.head
             mask = self.shared_queue._state.mask
-            self.batch_tail = (self.batch_head + available) & mask
+            self.batch_head =self.shared_queue._state.head
+            self.batch_tail = (self.batch_head + available_slots) & mask
+
+            #Only update Head for Concurrency.
             self.shared_queue._state.head = self.batch_tail
         #immediately start dequeuing.
-        self.dequeue_batch(available)
+        self.dequeue_batch(available_slots)
         return 
 
     def dequeue_batch(self, count: int):
-        """
-        Move all tasks from the task slots onto the local slots.
-        """ 
-        #for performance avoid calling self.localtastqueue.start 
-        tmp_head = self.LocalTaskQueue.head
-        tmp_tail = self.LocalTaskQueue.tail 
-                
-        for i in range(tmp_head, tmp_tail):
-            self.LocalTaskQueue.slots[i &self.LocalTaskQueue._state.mask]= \
-                self.shared_queue.slots[i &self.shared_queue._state.mask]
+        #TO DO: move batch_enqueue logic to the worker from the queue.
+        #Simply treat queue as nothing more than an array.
+
+        first_slot = self.shared_queue.slots[self.batch_head]
+        self.LocalTaskQueue.batch_enqueue(count, first_slot)
+
+        bm = self.shared_queue._state._batch_bitmap.value
+        bm ^= (1 << self._worker_id)
+        self.shared_queue._state._batch_bitmap.value = bm
+
+
+        if self.shared_queue._state._batch_bitmap == 0:
+            self.shared_queue._state.head += (
+                self.shared_queue._state._batch_accumulation & self.shared_queue._state.mask
+            )
+ #More versatile, it does cpu and I/O work
+ # some different scheduling concerns also needed for this 
+ #
+class IOWorker:
+    def run(self):
+        print("IOWORKER NOT IMPLEMENTED")
+        print("JUST FOR TESTING")
+    def batch_log(self):
+        pass
+    def log(self):
+        pass
+
+'''
+from multiprocessing import Process
+import queues
+
+def create_worker_pool(shared queue):
+    cpu = Worker() //takes shared queue
+    io = IOWorker()
+    cpu.run()
+    io.run()
+
+    processes = []
+    for i in range(4):
+        p = Process(target=create_worker_pool)
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()
+
+    print("GRACEFUL TERIMINATION on 'ts'")
+
+'''
+            
