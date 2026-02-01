@@ -7,8 +7,8 @@ This API aims to provide a **Parallelism Model in Python** where workers are dis
 - The system has its own scheduler logic that uses **locks**, unlike other common scheduling models.
 - To reduce lock contention, **batching** and **range-reserving** techniques are used.
 
-For more information Regarding Scheduler design refer to:
-[A Shared Ring Queue with Batch Ranging and Claiming](https://github.com/JuneKim0007/A-Shared-Ring-Queue-with-Batch-Ranging-Claiming)
+
+  For more information regarding Scheulder, please refer to: [A Shared Ring Queue with Batch Ranging and Claiming](https://github.com/JuneKim0007/A-Shared-Ring-Queue-with-Batch-Ranging-Claiming)
 ---
 
 ## Sections (Work in Progress)
