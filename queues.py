@@ -1,5 +1,9 @@
 # Based on complete clarifications from the paper author, me!!!
-
+# REFER TO https://avc-1.gitbook.io/ringqueuebitmapbatchingamongmultipleconsumer/
+# Though I was somewhat confident in the design, just like any concurrency modles, you can never be sure so:
+# I have simulated this Using various LLM Products out there in the market.
+# So far all correctness has been checked with concurrency and paralleism bugs.
+# However, there are still needs to check and implement minor bugs like checking for queue empty, or full.
 import ctypes
 from enum import IntEnum
 from slot import TaskSlot128
@@ -43,7 +47,7 @@ class QueueConfig(ctypes.Structure):
 
 
 #============================================================
-# QUEUE STATE - Matching Paper's Coordination Layer
+# QUEUE STATE 
 #============================================================
 class QueueState:
     '''
@@ -111,7 +115,7 @@ class ConsumerState:
     batch_size: Number of slots in current batch
     local_buffer: Optional local storage for fetched slots
     
-    NOTE: max_batch_size will be validated against queue size during claim_batch_range.
+
     '''
     __slots__ = ("consumer_id", "batch_head", "batch_tail", "batch_size", "local_buffer")
     
@@ -124,7 +128,6 @@ class ConsumerState:
         self.batch_tail: int = 0
         self.batch_size: int = 0
         
-        #Optional local buffer
         if max_batch_size > 0:
             SlotArray = TaskSlot128 * max_batch_size
             self.local_buffer = SlotArray()
@@ -133,7 +136,7 @@ class ConsumerState:
 
 
 # ============================================================
-# Local Queue (unchanged for reference)
+# Local Queue
 # ============================================================
 class LocalTaskQueue:
     '''Single-producer, single-consumer queue without batching.'''
@@ -426,7 +429,6 @@ class SharedTaskQueue:
                 state.committed_accumulation += state.batch_accumulation_counter
                 state.batch_accumulation_counter = 0
                 
-                #Reset participant counter (Mechanism 3)
                 state.num_batch_participants = 0
                 
                 #Signal producer that committed_accumulation is ready
