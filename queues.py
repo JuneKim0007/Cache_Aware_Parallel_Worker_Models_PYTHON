@@ -1,6 +1,6 @@
-# Based on complete clarifications from the paper author, me!!!
+
 # REFER TO https://avc-1.gitbook.io/ringqueuebitmapbatchingamongmultipleconsumer/
-# Though I was somewhat confident in the design, just like any concurrency modles, you can never be sure so:
+# Though I was somewhat confident in the design, just like any concurrency modles, I could never be sure so...
 # I have simulated this Using various LLM Products out there in the market.
 # So far all correctness has been checked with concurrency and paralleism bugs.
 # However, there are still needs to check and implement minor bugs like checking for queue empty, or full.
