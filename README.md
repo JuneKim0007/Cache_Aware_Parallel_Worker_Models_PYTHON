@@ -30,13 +30,13 @@ It bypasses Python's GIL limitation by using separate processes with shared memo
 ## 2. Architecture
 
 ```
-#################################################################
-# SUPERVISOR[EntryPoint] (main.py)                              #
-#  Creates shared memory regions                                #
-#  Spawns worker processes via fork()                           #
-#  Enqueues tasks (producer role)                               #
-#  Reads worker status for display                              #
-#################################################################
+┌────────────────────────────────────────────────────────────
+| SUPERVISOR[EntryPoint] (main.py)                          |
+|  Creates shared memory regions                            |
+|  Spawns worker processes via fork()                       |
+|  Enqueues tasks (producer role)                           |
+|  Reads worker status for display                          |
+└────────────────────────────────────────────────────────────
                               │ fork()
                               ▼
 ┌────────────────────────────────────────────────────────────
