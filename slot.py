@@ -1,8 +1,11 @@
-
 import ctypes
 from enum import IntEnum
+from typing import Type
 
-#Maybe loading from .json file might be nicer.
+
+#============================================================
+# TASK FUNCTION ID
+#============================================================
 class ProcTaskFnID(IntEnum):
     TERMINATE     = 0x0000
     READ_FILE     = 0x1000
@@ -25,78 +28,91 @@ def register_fn_id(name: str, value: int) -> int:
     TaskFnTypes[name] = value
     return value
 
+
+#============================================================
+# SLOT VARIANT [C1]
+#============================================================
+class SlotVariant(IntEnum):
+    '''
+    Distinguishes argument storage strategy in slot types.
+    Workers use this to determine how to parse task arguments.
+    '''
+    INT_ARGS  = 0x00   #args stored as c_int64 array only
+    CHAR_ARGS = 0x01   #args include c_char array (c_args field)
+
+
+#============================================================
+# SLOT STRUCTURES
+#============================================================
 class TaskSlot128(ctypes.Structure):
     '''
-    This is a generic 128-byte task slot to hold task_id, function_id, arguments and meta data.
-    For more flexible usage, refers to TaskSlot196 or 256. 
-    tsk_id: tsk_id is an increment counter distributed to each task.
-    fn_id: fn_id is a mapping to signify which function worker has to process.
-    args: stores arguments for a fuction that is mapped to fn_id. 
+    Generic 128-byte task slot with integer arguments.
+    
+    tsk_id: increment counter distributed to each task
+    fn_id: mapping to signify which function worker processes
+    args: stores arguments as c_int64 array
+    meta: metadata bytes
+    
+    Variant: INT_ARGS
     '''
-    _align_ = 128 #make sure its a multiple of 64 bytes.
+    _align_ = 128
     _fields_ = [
-        ("tsk_id", ctypes.c_uint32),           # 4 bytes
-        ("fn_id", ctypes.c_uint32),          # 4 bytes
+        ("tsk_id", ctypes.c_uint32),          # 4 bytes
+        ("fn_id", ctypes.c_uint32),           # 4 bytes
         ("args", ctypes.c_int64 * 10),        # 80 bytes generic args
         ("meta", ctypes.c_uint8 * 40),        # 40 bytes meta data
     ]
 
 
-
 class TaskSlot196(ctypes.Structure):
     '''
-    This is a generic 192-byte task slot to hold task_id, function_id, arguments and meta data.
-    For more flexible usage, refers to TaskSlot256 or TaskSlot512
-
-    tsk_id: tsk_id is an increment counter distributed to each task.
-    fn_id: fn_id is a mapping to signify which function worker has to process.
-    args: stores arguments for a fuction that is mapped to fn_id. 
+    Generic 192-byte task slot with integer arguments.
+    For more flexible usage, refers to TaskSlot256 or TaskSlot512.
+    
+    Variant: INT_ARGS
     '''
-    _align_ = 196 #make sure its a multiple of 64 bytes.
+    _align_ = 196
     _fields_ = [
-        ("tsk_id", ctypes.c_uint32),           # 4 bytes
-        ("fn_id", ctypes.c_uint32),          # 4 bytes
+        ("tsk_id", ctypes.c_uint32),          # 4 bytes
+        ("fn_id", ctypes.c_uint32),           # 4 bytes
         ("args", ctypes.c_int64 * 15),        # 120 bytes generic args
         ("meta", ctypes.c_uint8 * 64),        # 64 bytes meta data
     ]
     
+
 class TaskSlot128_cargs(ctypes.Structure):
     '''
-    This char+int arugment 128-byte task slot to hold task_id, function_id, arguments and meta data.
-    For more flexible usage, refers to TaskSlot256 or TaskSlot512
-
-    tsk_id: tsk_id is an increment counter distributed to each task.
-    fn_id: fn_id is a mapping to signify which function worker has to process.
-    args: stores arguments for a fuction that is mapped to fn_id. 
-    c_args: stores argument in char type. Use '\0' as a termination condition. 
-        and '0x20' or white space to parse arguments.
-
-        d
+    128-byte task slot with char+int arguments.
+    
+    tsk_id: increment counter distributed to each task
+    fn_id: mapping to signify which function worker processes
+    args: stores integer arguments (reduced count)
+    c_args: stores char arguments; use '\0' as termination,
+            '0x20' (space) to parse multiple arguments
+    meta: metadata bytes
+    
+    Variant: CHAR_ARGS
     '''
-    _align_ = 128 #make sure its a multiple of 64 bytes.
+    _align_ = 128
     _fields_ = [
         ("tsk_id", ctypes.c_uint32),          # 4 bytes
         ("fn_id", ctypes.c_uint32),           # 4 bytes
-        ("args", ctypes.c_int64 * 2),        # 16 bytes generic args
+        ("args", ctypes.c_int64 * 2),         # 16 bytes generic args
         ("c_args", ctypes.c_char * 64),       # 64 bytes char args
         ("meta", ctypes.c_uint8 * 40),        # 40 bytes meta data
     ]
 
 
-
 class TaskSlot196_cargs(ctypes.Structure):
     '''
-    This char+int arugment 196-byte task slot to hold task_id, function_id, arguments and meta data.
-    For more flexible usage, refers to TaskSlot256 or TaskSlot512
-
-    tsk_id: tsk_id is an increment counter distributed to each task.
-    fn_id: fn_id is a mapping to signify which function worker has to process.
-    args: stores arguments for a fuction that is mapped to fn_id. 
-    c_args: stores argument in char type. Use '\0' as a termination condition. 
-            and '0x20' or white space to parse arguments.
-
+    196-byte task slot with char+int arguments.
+    
+    c_args: stores char arguments; use '\0' as termination,
+            '0x20' (space) to parse multiple arguments
+    
+    Variant: CHAR_ARGS
     '''
-    _align_ = 196 #make sure its a multiple of 64 bytes.
+    _align_ = 196
     _fields_ = [
         ("tsk_id", ctypes.c_uint32),          # 4 bytes
         ("fn_id", ctypes.c_uint32),           # 4 bytes
@@ -105,4 +121,36 @@ class TaskSlot196_cargs(ctypes.Structure):
         ("meta", ctypes.c_uint8 * 64),        # 64 bytes meta data
     ]
 
-    ####
+
+#============================================================
+# SLOTS
+#============================================================
+SLOT_REGISTRY: dict[Type[ctypes.Structure], SlotVariant] = {
+    TaskSlot128:       SlotVariant.INT_ARGS,
+    TaskSlot196:       SlotVariant.INT_ARGS,
+    TaskSlot128_cargs: SlotVariant.CHAR_ARGS,
+    TaskSlot196_cargs: SlotVariant.CHAR_ARGS,
+}
+
+
+#============================================================
+# HELPERS
+#============================================================
+def get_slot_variant(slot_class: Type[ctypes.Structure]) -> SlotVariant:
+    if slot_class not in SLOT_REGISTRY:
+        raise KeyError(f"slot_class {slot_class.__name__} not in SLOT_REGISTRY")
+    return SLOT_REGISTRY[slot_class]
+
+
+def has_char_args(slot_class: Type[ctypes.Structure]) -> bool:
+    return get_slot_variant(slot_class) == SlotVariant.CHAR_ARGS
+
+
+def register_slot_class(slot_class: Type[ctypes.Structure], variant: SlotVariant):
+    if slot_class in SLOT_REGISTRY:
+        raise ValueError(f"slot_class {slot_class.__name__} already registered")
+    SLOT_REGISTRY[slot_class] = variant
+
+
+def get_slot_size(slot_class: Type[ctypes.Structure]) -> int:
+    return ctypes.sizeof(slot_class)
