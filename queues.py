@@ -1,13 +1,21 @@
-
 # REFER TO https://avc-1.gitbook.io/ringqueuebitmapbatchingamongmultipleconsumer/
 # Though I was somewhat confident in the design, just like any concurrency modles, I could never be sure so...
 # I have simulated this Using various LLM Products out there in the market.
 # So far all correctness has been checked with concurrency and paralleism bugs.
 # However, there are still needs to check and implement minor bugs like checking for queue empty, or full.
+#
 import ctypes
 from enum import IntEnum
-from slot import TaskSlot128
-import threading
+from multiprocessing import Lock
+from multiprocessing.shared_memory import SharedMemory
+from typing import Type, List, TYPE_CHECKING
+
+from slot import TaskSlot128, SlotVariant, get_slot_variant, SLOT_REGISTRY
+from errors import ErrorCode, Component, format_error, validate_num_slots, validate_num_workers
+
+if TYPE_CHECKING:
+    from worker import Worker
+
 
 class AllocationError(Exception):
     pass
@@ -47,59 +55,58 @@ class QueueConfig(ctypes.Structure):
 
 
 #============================================================
-# QUEUE STATE 
+# SHARED QUEUE STATE (ctypes for shared memory)
 #============================================================
-class QueueState:
+class SharedQueueState(ctypes.Structure):
     '''
-    Ring queue state matching paper's design:
+    Queue state in shared memory for cross-process access.
     
     head: Consumer dequeue position (consumers advance this during batch claim)
     tail: Producer enqueue position (producer advances this during enqueue)
     _num_slots: Total slots in ring buffer
     mask: For modular arithmetic (_num_slots - 1)
-    
-    --For local queue only:
-    curr_size: Number of occupied slots
-    
-    --For shared queue - Coordination layer:
-    logical_occupancy: Producer's view of occupied slots (updated on enqueue success and batch commit)
+    logical_occupancy: Producer's view of occupied slots
     active_batches: Bitmap tracking which consumers have active batches
     batch_accumulation_counter: Accumulates slots claimed during current batch cycle
-    committed_accumulation: Ready for producer to consume (decrement logical_occupancy)
-    is_committed: Flag indicating batches completed and producer should update logical_occupancy
-    num_batch_participants: Mechanism 3 - limits concurrent batchers
+    committed_accumulation: Ready for producer to consume
+    is_committed: Flag indicating batches completed
+    active_worker_count: Current number of active workers
+    available_consumer_ids: Bitmap of available consumer IDs (1=available)
     '''
-    __slots__ = (
-        "head",
-        "tail", 
-        "_num_slots",
-        "mask",
-        "curr_size",
-        "logical_occupancy",
-        "active_batches",
-        "batch_accumulation_counter",
-        "committed_accumulation",
-        "is_committed",
-        "num_batch_participants"
-    )
+    _fields_ = [
+        ("head", ctypes.c_uint32),
+        ("tail", ctypes.c_uint32),
+        ("_num_slots", ctypes.c_uint32),
+        ("mask", ctypes.c_uint32),
+        ("logical_occupancy", ctypes.c_uint32),
+        ("active_batches", ctypes.c_uint64),
+        ("batch_accumulation_counter", ctypes.c_uint32),
+        ("committed_accumulation", ctypes.c_uint32),
+        ("is_committed", ctypes.c_uint8),
+        ("active_worker_count", ctypes.c_uint8),
+        ("_pad", ctypes.c_uint8 * 2),
+        ("available_consumer_ids", ctypes.c_uint64),
+        ("_padding", ctypes.c_uint8 * 16),
+    ]
+
+SHARED_QUEUE_STATE_SIZE = ctypes.sizeof(SharedQueueState)
+
+
+#============================================================
+# LOCAL QUEUE STATE (Python object, not shared)
+#============================================================
+class LocalQueueState:
+    '''
+    Local queue state (single process, no sharing needed).
+    '''
+    __slots__ = ("head", "tail", "_num_slots", "mask", "curr_size")
     
-    def __init__(self, _num_slots: int, is_shared: bool = False):
+    def __init__(self, _num_slots: int):
         self.head: int = 0
         self.tail: int = 0
         self._num_slots: int = _num_slots
         self.mask: int = _num_slots - 1
-        
-        #Local queue only
         self.curr_size: int = 0
-        
-        #Shared queue only - coordination layer
-        if is_shared:
-            self.logical_occupancy: int = 0
-            self.active_batches = ctypes.c_uint64(0)
-            self.batch_accumulation_counter: int = 0
-            self.committed_accumulation: int = 0
-            self.is_committed: bool = False
-            self.num_batch_participants: int = 0
 
 
 #============================================================
@@ -107,183 +114,265 @@ class QueueState:
 #============================================================
 class ConsumerState:
     '''
-    Per-consumer state for batch range-claiming:
-    
-    consumer_id: Unique ID (0-63) for bitmap indexing
-    batch_head: Start index of claimed batch range
-    batch_tail: End index of claimed batch range
-    batch_size: Number of slots in current batch
-    local_buffer: Optional local storage for fetched slots
-    
-
+    Per-consumer state for batch range-claiming.
     '''
-    __slots__ = ("consumer_id", "batch_head", "batch_tail", "batch_size", "local_buffer")
+    __slots__ = ("consumer_id", "batch_head", "batch_tail", "batch_size", 
+                 "local_buffer", "slot_class")
     
-    def __init__(self, consumer_id: int, max_batch_size: int = 0):
+    def __init__(self, consumer_id: int, max_batch_size: int = 0, 
+                 slot_class: Type[ctypes.Structure] = TaskSlot128):
         if consumer_id >= 64:
-            raise ValueError(f"consumer_id must be < 64 for bitmap, got {consumer_id}")
+            raise ValueError(format_error(
+                ErrorCode.E011_INVALID_CONSUMER_ID,
+                Component.WORKER,
+                f"consumer_id must be < 64 for bitmap, got {consumer_id}"
+            ))
         
         self.consumer_id: int = consumer_id
         self.batch_head: int = 0
         self.batch_tail: int = 0
         self.batch_size: int = 0
+        self.slot_class = slot_class
         
         if max_batch_size > 0:
-            SlotArray = TaskSlot128 * max_batch_size
+            SlotArray = slot_class * max_batch_size
             self.local_buffer = SlotArray()
         else:
             self.local_buffer = None
 
 
-# ============================================================
-# Local Queue
-# ============================================================
+#============================================================
+# Local Queue (single process, no shared memory)
+#============================================================
 class LocalTaskQueue:
-    '''Single-producer, single-consumer queue without batching.'''
-    __slots__ = ("_state", "_slots_base", "slots", "_config", "_raw_buffer")
+    '''
+    Single-producer, single-consumer queue without batching.
+    Used within a single process (worker's local buffer).
+    '''
+    __slots__ = ("_state", "_slots_base", "slots", "_config", "_raw_buffer", 
+                 "_slot_class", "_slot_variant")
     DEFAULT_NUM_SLOTS = 256
 
-    def __init__(self, _num_slots: int | None = None,
-                 slot = TaskSlot128,
-                 qtype: ProcQueueTypes = ProcQueueTypes.TASK_DISPATCH):
+    def __init__(self, 
+                 _num_slots: int | None = None,
+                 slot_class: Type[ctypes.Structure] | None = None,
+                 qtype: ProcQueueTypes = ProcQueueTypes.TASK_DISPATCH,
+                 shared_queue: 'SharedTaskQueue | None' = None):
+        '''
+        Initialize local queue.
         
-        _num_slots = _num_slots or self.DEFAULT_NUM_SLOTS
+        Args:
+            _num_slots: Number of slots (default: 256)
+            slot_class: ctypes.Structure class (default: TaskSlot128)
+            qtype: Queue type enum
+            shared_queue: Optional SharedTaskQueue to derive config from
+        '''
+        if shared_queue is not None:
+            slot_class = slot_class or shared_queue.slot_class
+            _num_slots = _num_slots or self.DEFAULT_NUM_SLOTS
+        else:
+            slot_class = slot_class or TaskSlot128
+            _num_slots = _num_slots or self.DEFAULT_NUM_SLOTS
+        
+        self._slot_class = slot_class
+        self._slot_variant = get_slot_variant(slot_class)
         
         self._config = QueueConfig(
             _num_slots=_num_slots,
-            slot_size=ctypes.sizeof(slot),
+            slot_size=ctypes.sizeof(slot_class),
             queue_type=qtype,
-            num_workers = 1
+            num_workers=1
         )
         
+        #64-byte aligned buffer
         raw_bytes = _num_slots * self._config.slot_size + 63
         self._raw_buffer = ctypes.create_string_buffer(raw_bytes)
         raw_addr = ctypes.addressof(self._raw_buffer)
         self._slots_base = (raw_addr + 63) & ~63
 
-        SlotArray = TaskSlot128 * _num_slots
+        SlotArray = slot_class * _num_slots
         self.slots = SlotArray.from_address(self._slots_base)
-        self._state = QueueState(_num_slots, is_shared=False)
-
-        print(f"[QUEUE][LOCAL][INITIALIZED] onto Worker 'workerID' on 'TS'")
+        self._state = LocalQueueState(_num_slots)
 
     @property
     def config(self) -> QueueConfig:
         return self._config
+    
+    @property
+    def slot_class(self) -> Type[ctypes.Structure]:
+        return self._slot_class
+    
+    @property
+    def slot_variant(self) -> SlotVariant:
+        return self._slot_variant
 
     def enqueue(self, slot):
         state = self._state
-        slots = self.slots
         tail = state.tail
-        next_tail = (tail + 1) & state.mask
         
         if state.curr_size == state._num_slots:
-            raise RuntimeError("Queue full")
+            raise RuntimeError(format_error(
+                ErrorCode.E001_QUEUE_FULL, Component.LOCAL_QUEUE, "Queue full"
+            ))
         
-        ctypes.memmove(ctypes.byref(slots[tail]), ctypes.byref(slot), ctypes.sizeof(slot))
-        self._state.tail = next_tail
-        self._state.curr_size += 1
+        ctypes.memmove(ctypes.byref(self.slots[tail]), ctypes.byref(slot), ctypes.sizeof(slot))
+        state.tail = (tail + 1) & state.mask
+        state.curr_size += 1
 
     def dequeue(self) -> int:
         state = self._state
-        slots = self.slots
         head = state.head
         
         if state.curr_size == 0:
-            raise RuntimeError("Queue empty")
+            raise RuntimeError(format_error(
+                ErrorCode.E005_QUEUE_EMPTY, Component.LOCAL_QUEUE, "Queue empty"
+            ))
 
-        tsk_id = slots[head].tsk_id
-        self._state.head = (head + 1) & state.mask
-        self._state.curr_size -= 1
+        tsk_id = self.slots[head].tsk_id
+        state.head = (head + 1) & state.mask
+        state.curr_size -= 1
         return tsk_id
 
     def batch_enqueue(self, count, slot):
         '''Batch enqueue for local queue'''
         state = self._state
-        slots = self.slots
         tail = state.tail
-        next_tail = (tail + count) & state.mask
 
-        available_slots = self._state._num_slots - self._state.curr_size 
+        available_slots = state._num_slots - state.curr_size 
         
         if available_slots < count:
-            raise RuntimeError(f"[ERROR][Queue][Local] onto Worker 'workerID' - Queue full")
+            raise RuntimeError(format_error(
+                ErrorCode.E001_QUEUE_FULL, Component.LOCAL_QUEUE, 
+                f"Not enough space: need {count}, have {available_slots}"
+            ))
         
         #Handle wrap-around
         first = min(count, state._num_slots - tail)
         second = count - first
 
         ctypes.memmove(
-            ctypes.byref(slots[tail]),
+            ctypes.byref(self.slots[tail]),
             ctypes.byref(slot),
             ctypes.sizeof(slot) * first
         )
 
         if second > 0:
             ctypes.memmove(
-                ctypes.byref(slots[0]),
+                ctypes.byref(self.slots[0]),
                 ctypes.byref(slot, ctypes.sizeof(slot) * first),
                 ctypes.sizeof(slot) * second
             )
 
-        self._state.tail = next_tail
-        self._state.curr_size += count
+        state.tail = (tail + count) & state.mask
+        state.curr_size += count
 
     def is_empty(self) -> bool:
-        return self._state.head == self._state.tail
+        return self._state.curr_size == 0
 
     def is_full(self) -> bool:
-        return self._state._num_slots - self._state.curr_size < 1
+        return self._state.curr_size >= self._state._num_slots
 
     def count(self) -> int:
         return self._state.curr_size
 
 
 #============================================================
-# SharedTaskQueue  
+# SharedTaskQueue (multiprocessing, shared memory)
 #============================================================
 class SharedTaskQueue:
     '''
     Single-producer, multiple-consumer shared queue with batch range-claiming.
+    Uses multiprocessing.Lock and SharedMemory for cross-process access.
     '''
     __slots__ = (
         "queue_id", "_state", "_slots_base", "slots", "_config",
-        "_raw_buffer", "lock", "batch_commit_lock", "_max_batch_participants"
+        "_shm_slots", "_shm_state", "lock", "batch_commit_lock",
+        "_slot_class", "_slot_variant", "queue_name", "_queue_type",
+        "_log_queue", "shm_slots_name", "shm_state_name"
     )
     
-    DEFAULT_MAX_BATCH_PARTICIPANTS = 8
+    DEFAULT_NUM_SLOTS = 256
+    DEFAULT_QUEUE_NAME = "shared_queue"
     
-    def __init__(self, queue_id: int, _num_slots: int, num_workers: int,
-                 max_batch_participants: int | None = None):
+    def __init__(self, 
+                 queue_id: int,
+                 _num_slots: int | None = None,
+                 num_workers: int = 1,
+                 slot_class: Type[ctypes.Structure] = TaskSlot128,
+                 queue_name: str | None = None,
+                 queue_type: ProcQueueTypes = ProcQueueTypes.TASK_DISTRIBUTE,
+                 lock: Lock = None,
+                 batch_lock: Lock = None,
+                 log_queue = None):
+        '''
+        Initialize shared queue.
         
-        if num_workers > 64:
-            raise AllocationError(f"num_workers > 64, got {num_workers}")
-
+        Args:
+            queue_id: Unique identifier
+            _num_slots: Number of slots (default: 256, must be power of 2)
+            num_workers: Max workers (must be <= 64 for bitmap)
+            slot_class: ctypes.Structure class for slots
+            queue_name: String identifier
+            queue_type: Queue type enum
+            lock: multiprocessing.Lock for main operations
+            batch_lock: multiprocessing.Lock for batch commit
+            log_queue: multiprocessing.Queue for error logging
+        '''
+        _num_slots = _num_slots or self.DEFAULT_NUM_SLOTS
+        
+        #Validate parameters
+        err = validate_num_slots(_num_slots)
+        if err:
+            raise ValueError(format_error(ErrorCode.E002_INVALID_NUM_SLOTS, Component.SHARED_QUEUE, err))
+        
+        err = validate_num_workers(num_workers)
+        if err:
+            raise AllocationError(format_error(ErrorCode.E003_NUM_WORKERS_EXCEEDED, Component.SHARED_QUEUE, err))
+        
+        self.queue_id = queue_id
+        self.queue_name = queue_name or self.DEFAULT_QUEUE_NAME
+        self._slot_class = slot_class
+        self._slot_variant = get_slot_variant(slot_class)
+        self._queue_type = queue_type
+        self._log_queue = log_queue
+        
+        slot_size = ctypes.sizeof(slot_class)
+        
         self._config = QueueConfig(
             _num_slots=_num_slots,
-            slot_size=ctypes.sizeof(TaskSlot128),
-            queue_type=ProcQueueTypes.TASK_DISTRIBUTE,
+            slot_size=slot_size,
+            queue_type=queue_type,
             num_workers=num_workers
         )
-
-        self.queue_id = queue_id
         
-        #64-byte aligned memory layout
-        raw_bytes = _num_slots * self._config.slot_size + 63
-        self._raw_buffer = ctypes.create_string_buffer(raw_bytes)
-        raw_addr = ctypes.addressof(self._raw_buffer)
-        self._slots_base = (raw_addr + 63) & ~63
-
-        SlotArray = TaskSlot128 * _num_slots
-        self.slots = SlotArray.from_address(self._slots_base)
-        self._state = QueueState(_num_slots, is_shared=True)
+        #Shared memory for slots (64-byte aligned)
+        slot_buffer_size = _num_slots * slot_size
+        self._shm_slots = SharedMemory(create=True, size=slot_buffer_size)
+        self.shm_slots_name = self._shm_slots.name
         
-        #Two-lock design
-        self.lock = threading.Lock()
-        self.batch_commit_lock = threading.Lock()
-        self._max_batch_participants = max_batch_participants or self.DEFAULT_MAX_BATCH_PARTICIPANTS
+        SlotArray = slot_class * _num_slots
+        self.slots = SlotArray.from_buffer(self._shm_slots.buf)
         
-        print(f"[QUEUE][SHARED][INITIALIZED] queue_id={self.queue_id}")
+        #Shared memory for queue state
+        self._shm_state = SharedMemory(create=True, size=SHARED_QUEUE_STATE_SIZE)
+        self.shm_state_name = self._shm_state.name
+        
+        self._state = SharedQueueState.from_buffer(self._shm_state.buf)
+        self._state._num_slots = _num_slots
+        self._state.mask = _num_slots - 1
+        self._state.head = 0
+        self._state.tail = 0
+        self._state.logical_occupancy = 0
+        self._state.active_batches = 0
+        self._state.batch_accumulation_counter = 0
+        self._state.committed_accumulation = 0
+        self._state.is_committed = 0
+        self._state.active_worker_count = 0
+        self._state.available_consumer_ids = (1 << 64) - 1  #All available
+        
+        #Multiprocessing locks
+        self.lock = lock or Lock()
+        self.batch_commit_lock = batch_lock or Lock()
 
     @property
     def _num_slots(self) -> int:
@@ -292,88 +381,132 @@ class SharedTaskQueue:
     @property
     def config(self) -> QueueConfig:
         return self._config
+    
+    @property
+    def slot_class(self) -> Type[ctypes.Structure]:
+        return self._slot_class
+    
+    @property
+    def slot_variant(self) -> SlotVariant:
+        return self._slot_variant
+    
+    @property
+    def slot_size(self) -> int:
+        return self._config.slot_size
 
     #
     # PRODUCER OPERATIONS
     #
-    def enqueue(self, slot):
+    def _try_enqueue(self, slot) -> bool:
+        '''Try to enqueue once. Returns True on success.'''
         state = self._state
-    
+        
         if state.is_committed:
             with self.batch_commit_lock:
                 state.logical_occupancy -= state.committed_accumulation
                 state.committed_accumulation = 0
-                state.is_committed = False
+                state.is_committed = 0
         
         if state.logical_occupancy >= self._num_slots:
-            raise RuntimeError(f"[Queue][Shared][ERROR] Queue Id: {self.queue_id} - Queue full")
+            return False
         
-        #Write at TAIL position (producer enqueue position)
         tail = state.tail
         ctypes.memmove(
             ctypes.byref(self.slots[tail]),
             ctypes.byref(slot),
-            ctypes.sizeof(slot)
+            self.slot_size
         )
         
         state.tail = (tail + 1) & state.mask
         state.logical_occupancy += 1
+        return True
+
+    def enqueue(self, slot) -> bool:
+        '''
+        Enqueue a task slot (non-blocking).
+        Returns True on success, False if queue full.
+        '''
+        success = self._try_enqueue(slot)
+        if not success and self._log_queue:
+            try:
+                self._log_queue.put((-1, format_error(
+                    ErrorCode.E001_QUEUE_FULL, Component.SHARED_QUEUE,
+                    f"Queue {self.queue_id} full, task dropped"
+                )))
+            except:
+                pass
+        return success
+
+    def enqueue_blocking(self, slot, max_wait: float = 10.0) -> bool:
+        '''
+        Enqueue with blocking (exponential backoff).
+        
+        Args:
+            slot: Task slot to enqueue
+            max_wait: Maximum wait time in seconds
+            
+        Returns:
+            True if enqueued, False if timeout
+        '''
+        import time
+        
+        backoff = 0.001
+        backoff_cap = 0.1
+        elapsed = 0.0
+        
+        while elapsed < max_wait:
+            if self._try_enqueue(slot):
+                return True
+            
+            time.sleep(backoff)
+            elapsed += backoff
+            backoff = min(backoff * 2, backoff_cap)
+        
+        if self._log_queue:
+            try:
+                self._log_queue.put((-1, format_error(
+                    ErrorCode.E001_QUEUE_FULL, Component.SHARED_QUEUE,
+                    f"Queue {self.queue_id} full after {max_wait}s timeout"
+                )))
+            except:
+                pass
+        return False
 
     #
     # CONSUMER OPERATIONS
     #
     def claim_batch_range(self, consumer: ConsumerState, batch_size: int) -> bool:
         '''
-        Mechanism 1 & 3: Consumer claims a batch range atomically.
+        Consumer claims a batch range atomically.
         Returns True if claim succeeded, False otherwise.
         '''
         state = self._state
         
-
         max_allowed_batch = self._num_slots // 2
         if batch_size > max_allowed_batch:
-            raise ValueError(
-                f"batch_size ({batch_size}) exceeds hard limit of queue_size//2 "
-                f"({max_allowed_batch}). Maximum batch_size is {max_allowed_batch}."
-            )
-        # check the limit before the lock
-        if state.num_batch_participants >= self._max_batch_participants:
-            return False
+            raise ValueError(format_error(
+                ErrorCode.E004_INVALID_BATCH_SIZE, Component.SHARED_QUEUE,
+                f"batch_size ({batch_size}) exceeds queue_size//2 ({max_allowed_batch})"
+            ))
         
-        #Acquire lock for atomic bitmap set + range marking
         claim_succeeded = False
         with self.lock:
             bit_position = 1 << consumer.consumer_id
-            state.active_batches.value |= bit_position
+            state.active_batches |= bit_position
             
-            #Recheck for avoding race condition
-            if state.num_batch_participants >= self._max_batch_participants:
-                state.active_batches.value &= ~bit_position
+            available = (state.tail - state.head) & state.mask
+            if available >= batch_size:
+                consumer.batch_head = state.head
+                consumer.batch_tail = (state.head + batch_size) & state.mask
+                consumer.batch_size = batch_size
+                
+                state.head = consumer.batch_tail
+                state.batch_accumulation_counter += batch_size
+                
+                claim_succeeded = True
             else:
-                #Check available slots for claiming
-                #Occupied region is [head, tail) in circular buffer
-                #Available to claim = (tail - head) % N
-                available = (state.tail - state.head) & state.mask
-                if available >= batch_size:
-                    state.num_batch_participants += 1
-                    
-                    #Record batch range;consumer claims from HEAD
-                    consumer.batch_head = state.head
-                    consumer.batch_tail = (state.head + batch_size) & state.mask
-                    consumer.batch_size = batch_size
-                    
-                    #Advance HEAD to mark claimed range
-                    state.head = consumer.batch_tail
-                    
-                    #Update batch accumulation counter
-                    state.batch_accumulation_counter += batch_size
-                    
-                    claim_succeeded = True
-                else:
-                    state.active_batches.value &= ~bit_position
+                state.active_batches &= ~bit_position
         
-        #Lock released if claim succeeded, consumer can now dequeue outside critical section
-        #If failed, bitmap already cleared inside lock
         if not claim_succeeded:
             consumer.batch_size = 0
             return False
@@ -381,11 +514,7 @@ class SharedTaskQueue:
         return True
 
     def dequeue_batch(self, consumer: ConsumerState) -> bool:
-        '''
-        Mechanism 2: Dequeue claimed batch (outside critical section).
-        
-        Copies slots from shared queue to consumer's local buffer.
-        '''
+        '''Copy claimed batch to consumer's local buffer.'''
         if consumer.batch_size == 0:
             return False
         
@@ -395,108 +524,112 @@ class SharedTaskQueue:
         return True
 
     def finish_batch(self, consumer: ConsumerState):
-        '''
-        Mechanism 2: Consumer finishes batch and coordinates with producer.
-        
-        CRITICAL: This is called AFTER consumer has dequeued and processed tasks.
-        Bitmap clearing happens here (AFTER dequeue) to prevent producer from
-        overwriting slots while consumer is still processing them.
-        
-        Steps:
-        1. Clear consumer's bit in bitmap (AFTER dequeue complete)
-        2. If bitmap becomes zero (all batches done):
-           - Acquire batch_commit_lock
-           - Update committed_accumulation
-           - Reset batch_accumulation_counter
-           - Reset num_batch_participants
-           - Set is_committed = true
-           - Release lock
-        '''
+        '''Consumer finishes batch and coordinates with producer.'''
         state = self._state
         bit_position = 1 << consumer.consumer_id
         
-        #Clear bitmap AFTER dequeue is complete
-        #This prevents producer from overwriting slots still being processed
         bitmap_became_zero = False
         with self.lock:
-            state.active_batches.value &= ~bit_position
-            bitmap_became_zero = (state.active_batches.value == 0)
+            state.active_batches &= ~bit_position
+            bitmap_became_zero = (state.active_batches == 0)
         
-        #If all batches complete, commit to producer
         if bitmap_became_zero:
             with self.batch_commit_lock:
-                #Aggregate dequeued slots
                 state.committed_accumulation += state.batch_accumulation_counter
                 state.batch_accumulation_counter = 0
-                
-                state.num_batch_participants = 0
-                
-                #Signal producer that committed_accumulation is ready
-                state.is_committed = True
+                state.is_committed = 1
         
-        #Reset consumer's batch state
         consumer.batch_head = 0
         consumer.batch_tail = 0
         consumer.batch_size = 0
 
     def _copy_batch_to_local(self, consumer: ConsumerState):
-        '''Helper to copy batch from shared queue to consumer's local buffer'''
         if consumer.local_buffer is None:
             return
             
         state = self._state
         batch_head = consumer.batch_head
         batch_size = consumer.batch_size
+        slot_size = ctypes.sizeof(consumer.slot_class)
         
-        #Handle wrap-around in circular buffer
         if (batch_head + batch_size) <= state._num_slots:
-            #No wrap-around
             ctypes.memmove(
                 ctypes.byref(consumer.local_buffer[0]),
                 ctypes.byref(self.slots[batch_head]),
-                ctypes.sizeof(TaskSlot128) * batch_size
+                slot_size * batch_size
             )
         else:
-            #Wrap-around: copy in two parts
             first_part = state._num_slots - batch_head
             second_part = batch_size - first_part
             
             ctypes.memmove(
                 ctypes.byref(consumer.local_buffer[0]),
                 ctypes.byref(self.slots[batch_head]),
-                ctypes.sizeof(TaskSlot128) * first_part
+                slot_size * first_part
             )
             
             ctypes.memmove(
                 ctypes.byref(consumer.local_buffer[first_part]),
                 ctypes.byref(self.slots[0]),
-                ctypes.sizeof(TaskSlot128) * second_part
+                slot_size * second_part
             )
 
     #
-    # WARNING: No legacy single-item dequeue provided
+    # WORKER MANAGEMENT
     #
-    # The Shared Queue is designed for batch operations only. Single-item dequeue
-    # would not coordinate properly with the batch range-claiming mechanism:
-    # Because ...
-    #   It would advance head without updating batch_accumulation_counter
-    #   It wouldn't participate in bitmap coordination
-    #   It could break the producer's logical_occupancy tracking
-    # For this SharedTaskQueue, always use the batch workflow; 
-    # even for single fetching.
+    def allocate_consumer_id(self) -> int:
+        state = self._state
+        with self.lock:
+            if state.available_consumer_ids == 0:
+                return -1
+            
+            avail = state.available_consumer_ids
+            consumer_id = (avail & -avail).bit_length() - 1
+            
+            state.available_consumer_ids &= ~(1 << consumer_id)
+            state.active_worker_count += 1
+            
+            return consumer_id
+    
+    def release_consumer_id(self, consumer_id: int):
+        '''Release a consumer ID back to available pool.'''
+        if consumer_id < 0 or consumer_id >= 64:
+            return
+        
+        state = self._state
+        with self.lock:
+            state.available_consumer_ids |= (1 << consumer_id)
+            if state.active_worker_count > 0:
+                state.active_worker_count -= 1
 
+    #
+    # STATUS
+    #
     def is_empty(self) -> bool:
-        '''Check if queue is empty from producer perspective'''
         return self._state.logical_occupancy == 0
     
     def get_available_slots(self) -> int:
-        '''Get available slots from producer perspective'''
         return self._num_slots - self._state.logical_occupancy
     
     def get_actual_occupancy(self) -> int:
-        '''Get actual occupancy based on head/tail pointers'''
         state = self._state
         return (state.tail - state.head) & state.mask
+    
+    def get_active_worker_count(self) -> int:
+        return self._state.active_worker_count
+
+    def cleanup(self):
+        '''Release shared memory (call from parent process)'''
+        try:
+            self._shm_slots.close()
+            self._shm_slots.unlink()
+        except:
+            pass
+        try:
+            self._shm_state.close()
+            self._shm_state.unlink()
+        except:
+            pass
     
     def __str__(self):
         state = self._state
@@ -504,16 +637,20 @@ class SharedTaskQueue:
         
         info = [
             f"[SharedTaskQueue] queue_id={self.queue_id}",
+            f"queue_name={self.queue_name}",
+            f"slot_class={self._slot_class.__name__}",
+            f"slot_variant={self._slot_variant.name}",
+            f"slot_size={self.slot_size}",
+            f"queue_type={self._queue_type.name}",
             f"_num_slots={self._num_slots}",
             f"head={state.head}, tail={state.tail}",
-            f"logical_occupancy={state.logical_occupancy} (producer view)",
-            f"actual_occupancy={actual_occ} (head-tail)",
-            f"fake_occupied={state.logical_occupancy - actual_occ}",
-            f"active_batches=0x{state.active_batches.value:016x}",
+            f"logical_occupancy={state.logical_occupancy}",
+            f"actual_occupancy={actual_occ}",
+            f"active_batches=0x{state.active_batches:016x}",
             f"batch_accumulation={state.batch_accumulation_counter}",
             f"committed_accumulation={state.committed_accumulation}",
             f"is_committed={state.is_committed}",
-            f"num_batch_participants={state.num_batch_participants}/{self._max_batch_participants}",
+            f"active_worker_count={state.active_worker_count}",
         ]
 
         tasks = []
@@ -522,5 +659,5 @@ class SharedTaskQueue:
             slot = self.slots[idx]
             tasks.append(f"idx={idx}: tsk_id={slot.tsk_id}, fn_id={slot.fn_id}")
         info.extend(tasks)
+        
         return "\n".join(info)
-
