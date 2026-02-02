@@ -125,6 +125,10 @@ class Worker:
 
     def is_running(self) -> bool:
         return self._running
+    #some critical bug is found if terminated abrutly; 
+    def _exit(sig, frame):
+        import sys
+        sys.exit(0)
 
 
 #============================================================
