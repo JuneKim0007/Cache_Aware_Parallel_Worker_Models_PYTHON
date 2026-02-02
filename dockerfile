@@ -1,3 +1,5 @@
+###DEPRECIATED DO NOT USE IT
+RUN exit 1
 FROM python:3.11-alpine AS builder
 
 RUN apk add --no-cache \
@@ -25,6 +27,6 @@ COPY --from=builder /cworkers /cworkers
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-
-ENTRYPOINT ["/entrypoint.sh"]
+#No more needed due to the change in the design, may be used in the future tho.
+#ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python3", "-u", "setup.py"]
