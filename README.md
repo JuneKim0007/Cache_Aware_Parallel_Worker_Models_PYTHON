@@ -171,6 +171,6 @@ For more detailed information refer to this [link](https://avc-1.gitbook.io/ring
     return
 
   if name == "main":
-  exit(main())
+    exit(main())
 ```
 ---
