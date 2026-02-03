@@ -1,0 +1,34 @@
+# ============================================================
+# API/ARGS.PY
+# ============================================================
+# Argument parsing for CHAR_ARGS slots.
+# ============================================================
+
+from typing import List
+
+
+class ArgParser:
+    DEFAULT_TERMINATOR = b'\x00'
+    DEFAULT_DELIMITER = b' '
+    
+    def __init__(self, terminator: bytes = None, delimiter: bytes = None):
+        self.terminator = terminator or self.DEFAULT_TERMINATOR
+        self.delimiter = delimiter or self.DEFAULT_DELIMITER
+    
+    def parse(self, c_args: bytes) -> List[bytes]:
+        term_idx = c_args.find(self.terminator)
+        data = c_args[:term_idx] if term_idx != -1 else c_args
+        return data.split(self.delimiter) if data else []
+    
+    def parse_as_str(self, c_args: bytes, encoding: str = 'utf-8') -> List[str]:
+        return [arg.decode(encoding) for arg in self.parse(c_args) if arg]
+    
+    def pack(self, args: List[bytes]) -> bytes:
+        return self.delimiter.join(args) + self.terminator
+    
+    def pack_str(self, args: List[str], encoding: str = 'utf-8') -> bytes:
+        return self.pack([arg.encode(encoding) for arg in args])
+
+
+def unpack_args(c_args: bytes, encoding: str = 'utf-8') -> List[str]:
+    return ArgParser().parse_as_str(c_args, encoding)
