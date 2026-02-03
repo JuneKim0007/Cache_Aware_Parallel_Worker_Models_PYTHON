@@ -1,1 +1,149 @@
 psutil==5.9.5
+
+"""
+============================================================
+HIGH-PERFORMANCE MULTI-PROCESS TASK QUEUE DESIGN
+============================================================
+
+This blueprint outlines the workflow and memory design for a
+high-throughput shared memory task queue system in Python, 
+using ctypes structures for slot layout and multiprocessing
+shared memory.
+
+GOAL:
+- Minimize Python runtime overhead
+- Maximize allocation efficiency
+- Allow multi-process workers to safely access a shared queue
+- Supervisor displays live TTY stats without scrolling
+- Local worker queues for batch processing
+
+============================================================
+WORKFLOW OVERVIEW
+============================================================
+
+1. READ / LOAD INITIAL DATA
+   -------------------------
+   - Inputs can come from:
+       a) User input
+       b) Precomputed task list
+       c) File / database
+   - Preprocessing step: generate tasks and store in a Python list
+   - Tasks are eventually pushed into the shared memory queue
+
+2. ALLOCATE SHARED MEMORY QUEUE
+   -----------------------------
+   - Use multiprocessing.shared_memory.SharedMemory
+   - Define ctypes struct representing a task slot:
+       class TaskSlot128(ctypes.Structure):
+           _fields_ = [("tsk_id", ctypes.c_uint32),
+                       ("fn_id", ctypes.c_uint32),
+                       ("payload", ctypes.c_uint8 * 120)]
+       # Total size: 128 bytes per slot
+   - Decide on number of slots (num_slots)
+   - Allocate contiguous memory:
+       total_bytes = ctypes.sizeof(TaskSlot128) * num_slots
+       shm = SharedMemory(create=True, size=total_bytes)
+   - Map shared memory to ctypes array:
+       TaskArrayType = TaskSlot128 * num_slots
+       slots = TaskArrayType.from_buffer(shm.buf)
+
+   IMPORTANT NOTES:
+   - Raw shared memory is uninitialized; initialize slots if necessary
+     to avoid garbage values.
+   - This memory is sharable across processes via `shm.name`.
+   - Accessing slots via ctypes wrapper is fast (direct memory access).
+
+3. INITIALIZE SHARED QUEUE METADATA
+   ---------------------------------
+   - Optionally, maintain:
+       - head/tail pointers
+       - occupancy count
+       - consumer bitmaps
+       - synchronization primitives (locks or atomic updates)
+   - All of the above can be stored in shared memory as well, or
+     partially in Python if per-worker.
+   - Synchronization is critical if multiple workers update head/tail.
+
+4. SPAWN WORKERS
+   ---------------
+   - Each worker is a separate process.
+   - Pass to worker:
+       - shared memory name (`shm.name`)
+       - queue metadata info
+       - worker ID, consumer ID
+   - Worker upon initialization:
+       - attaches to shared memory: `SharedMemory(name=shm.name)`
+       - maps ctypes array: `TaskArrayType.from_buffer(shm.buf)`
+       - initializes **private local queue** (LocalTaskQueue) for batch processing
+   - Local queue:
+       - Should be fully initialized by worker (private memory)
+       - Avoids race conditions
+       - Supports batching for efficiency
+
+5. WORKER LOOP
+   -------------
+   - Worker continuously:
+       1. Claims batch from shared queue (atomically)
+       2. Copies tasks to local queue (no copying if possible, direct pointers)
+       3. Processes tasks via dispatch map
+           - Handles TERMINATE signals, errors
+           - Updates completed/failed counters
+       4. Marks batch as finished in shared queue (update occupancy)
+   - Worker suppresses stdout to avoid TTY scrolling
+   - Worker **must close shared memory object** when done but not unlink
+   - No need to initialize local queue from supervisor
+
+6. SUPERVISOR
+   ------------
+   - Creates shared memory queue first
+   - Pushes initial tasks into shared queue
+   - Spawns worker processes, passing shared memory name and metadata
+   - Reads shared memory for status display
+       - Uses WorkerStatus array in shared memory or per-worker
+       - Prints live TTY UI (fixed layout, no scrolling)
+   - Suppresses worker prints, only supervisor updates the terminal
+   - Handles graceful shutdown:
+       - Signals workers to terminate
+       - Joins all worker processes
+       - Closes and unlinks shared memory
+       - Avoids resource leaks (`BufferError` and `resource_tracker` warnings)
+
+7. CLEANUP
+   ---------
+   - Workers:
+       - close attached shared memory
+       - terminate naturally after batch processing or TERMINATE signal
+   - Supervisor:
+       - close + unlink shared memory
+       - print final stats
+   - Optional: logging or persisting results
+
+============================================================
+PERFORMANCE NOTES
+============================================================
+
+- Shared memory ctypes array avoids Python object overhead for slots
+- Direct access via `.from_buffer(shm.buf)` avoids copying
+- Local queues reduce contention on shared queue
+- Atomic operations or locks needed for shared head/tail
+- Batch processing reduces Python per-task overhead
+- Suppressing worker stdout keeps supervisor TTY clean
+- Avoid pickling; pass only shared memory **names** to workers
+- Minimize synchronization to maximize throughput
+
+============================================================
+KEY DESIGN DECISIONS
+============================================================
+
+- Supervisor owns shared memory and metadata
+- Workers only attach via shared memory name
+- Local queues are worker-private and initialized locally
+- Shared memory must be initialized for safety if logic expects non-zero
+- Synchronization primitives required for correctness, not speed
+- Worker prints suppressed, only supervisor handles TTY
+- Lifecycle: supervisor manages memory; workers close references but do not unlink
+
+============================================================
+END OF WORKFLOW COMMENTED BLUEPRINT
+============================================================
+"""

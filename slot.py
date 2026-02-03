@@ -87,7 +87,7 @@ class TaskSlot128_cargs(ctypes.Structure):
     tsk_id: increment counter distributed to each task
     fn_id: mapping to signify which function worker processes
     args: stores integer arguments (reduced count)
-    c_args: stores char arguments; use '\0' as termination,
+    c_args: stores char arguments; use '\\0' as termination,
             '0x20' (space) to parse multiple arguments
     meta: metadata bytes
     
@@ -107,7 +107,7 @@ class TaskSlot196_cargs(ctypes.Structure):
     '''
     196-byte task slot with char+int arguments.
     
-    c_args: stores char arguments; use '\0' as termination,
+    c_args: stores char arguments; use '\\0' as termination,
             '0x20' (space) to parse multiple arguments
     
     Variant: CHAR_ARGS
@@ -123,8 +123,9 @@ class TaskSlot196_cargs(ctypes.Structure):
 
 
 #============================================================
-# SLOTS
+# SLOT REGISTRY [C2]
 #============================================================
+#Maps slot_class -> SlotVariant for runtime lookup
 SLOT_REGISTRY: dict[Type[ctypes.Structure], SlotVariant] = {
     TaskSlot128:       SlotVariant.INT_ARGS,
     TaskSlot196:       SlotVariant.INT_ARGS,
@@ -134,23 +135,36 @@ SLOT_REGISTRY: dict[Type[ctypes.Structure], SlotVariant] = {
 
 
 #============================================================
-# HELPERS
+# HELPER FUNCTIONS [C3][C4]
 #============================================================
 def get_slot_variant(slot_class: Type[ctypes.Structure]) -> SlotVariant:
+    '''
+    [C3] Get the SlotVariant for a given slot class.
+    Raises KeyError if slot_class not registered.
+    '''
     if slot_class not in SLOT_REGISTRY:
         raise KeyError(f"slot_class {slot_class.__name__} not in SLOT_REGISTRY")
     return SLOT_REGISTRY[slot_class]
 
 
 def has_char_args(slot_class: Type[ctypes.Structure]) -> bool:
+    '''
+    [C4] Check if slot class has char arguments (c_args field).
+    Returns True for CHAR_ARGS variant, False for INT_ARGS.
+    '''
     return get_slot_variant(slot_class) == SlotVariant.CHAR_ARGS
 
 
 def register_slot_class(slot_class: Type[ctypes.Structure], variant: SlotVariant):
+    '''
+    Register a custom slot class with its variant.
+    Use this for user-defined slot types.
+    '''
     if slot_class in SLOT_REGISTRY:
         raise ValueError(f"slot_class {slot_class.__name__} already registered")
     SLOT_REGISTRY[slot_class] = variant
 
 
 def get_slot_size(slot_class: Type[ctypes.Structure]) -> int:
+    '''Get the size in bytes of a slot class.'''
     return ctypes.sizeof(slot_class)

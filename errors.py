@@ -1,17 +1,20 @@
 # ============================================================
 # ERRORS.PY
 # ============================================================
+# Centralized error codes and error handling utilities.
+# All errors follow format: [Error: E{ERRNO}][{COMPONENT}] {message}
+# ============================================================
 
 from enum import IntEnum
 from typing import Optional
 from multiprocessing import Queue
 
 
-import sys
 #============================================================
 # COMPONENT NAMES
 #============================================================
 class Component:
+    '''Component identifiers for error messages'''
     SHARED_QUEUE = "SharedQueue"
     LOCAL_QUEUE = "LocalQueue"
     WORKER = "Worker"
@@ -24,24 +27,28 @@ class Component:
 # ERROR CODES
 #============================================================
 class ErrorCode(IntEnum):
+    '''
+    Error codes for the multiprocessing task queue system.
+    '''
+    #Queue errors (E001-E010)
     E001_QUEUE_FULL = 1
     E002_INVALID_NUM_SLOTS = 2
     E003_NUM_WORKERS_EXCEEDED = 3
     E004_INVALID_BATCH_SIZE = 4
     E005_QUEUE_EMPTY = 5
     
-    #Worker errors
+    #Worker errors (E011-E020)
     E011_INVALID_CONSUMER_ID = 11
     E012_SHARED_QUEUE_NONE = 12
     E013_WORKER_SPAWN_FAILED = 13
     E014_WORKER_CRASHED = 14
     
-    #Allocation errors
+    #Allocation errors (E021-E030)
     E021_SHM_ALLOC_FAILED = 21
     E022_PROCESS_SPAWN_FAILED = 22
     E023_INVALID_SLOT_CLASS = 23
     
-    #Slot errors
+    #Slot errors (E031-E040)
     E031_UNKNOWN_SLOT_CLASS = 31
     E032_SLOT_ALREADY_REGISTERED = 32
 
@@ -60,6 +67,10 @@ def format_error(code: ErrorCode, component: str, message: str) -> str:
 
 def log_error(code: ErrorCode, component: str, message: str, 
               log_queue=None, print_stderr: bool = True) -> str:
+    '''
+    Format and optionally log/print error.
+    '''
+    import sys
     
     formatted = format_error(code, component, message)
     
@@ -76,13 +87,18 @@ def log_error(code: ErrorCode, component: str, message: str,
 
 
 #============================================================
-# FOR ALLOCATIONS
+# VALIDATION HELPERS
 #============================================================
 def is_power_of_two(n: int) -> bool:
+    '''Check if n is a power of 2'''
     return n > 0 and (n & (n - 1)) == 0
 
 
 def validate_num_slots(num_slots: int) -> Optional[str]:
+    '''
+    Validate num_slots parameter.
+    Returns error message if invalid, None if valid.
+    '''
     if num_slots <= 0:
         return f"num_slots must be positive, got {num_slots}"
     if not is_power_of_two(num_slots):
@@ -91,6 +107,10 @@ def validate_num_slots(num_slots: int) -> Optional[str]:
 
 
 def validate_num_workers(num_workers: int) -> Optional[str]:
+    '''
+    Validate num_workers parameter.
+    Returns error message if invalid, None if valid.
+    '''
     if num_workers <= 0:
         return f"num_workers must be positive, got {num_workers}"
     if num_workers > 64:
@@ -99,6 +119,10 @@ def validate_num_workers(num_workers: int) -> Optional[str]:
 
 
 def validate_consumer_id(consumer_id: int) -> Optional[str]:
+    '''
+    Validate consumer_id parameter.
+    Returns error message if invalid, None if valid.
+    '''
     if consumer_id < 0:
         return f"consumer_id must be non-negative, got {consumer_id}"
     if consumer_id >= 64:

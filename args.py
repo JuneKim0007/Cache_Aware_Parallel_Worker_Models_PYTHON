@@ -23,9 +23,9 @@ class ArgParser:
     '''
     Parses c_args field from CHAR_ARGS variant slots.
     
-    Default Teriminator and Parsor
-        Terminator: 0x00 (null byte)
-        Parsor: 0x20 (space)
+    Default format:
+    - Terminator: 0x00 (null byte)
+    - Delimiter: 0x20 (space)
     
     Example: b"arg1 arg2 arg3\x00" -> [b"arg1", b"arg2", b"arg3"]
     '''
@@ -67,7 +67,7 @@ class ArgParser:
     
     def pack(self, args: List[bytes]) -> bytes:
         '''
-        Compress list of arguments into c_args format.
+        Pack list of arguments into c_args format.
         
         Args:
             args: List of argument bytes
@@ -79,6 +79,7 @@ class ArgParser:
         return packed + self.terminator
     
     def pack_str(self, args: List[str], encoding: str = 'utf-8') -> bytes:
+        '''Pack list of strings into c_args format.'''
         return self.pack([arg.encode(encoding) for arg in args])
 
 
@@ -135,7 +136,7 @@ class ArgPool:
         '''
         Initialize argument pool.
         
-        Arguments:
+        Args:
             pool_type: STATIC or DYNAMIC
             num_slots: Number of slots (default: 64)
             shared: If True, use SharedMemory for cross-process
@@ -144,8 +145,10 @@ class ArgPool:
         self._num_slots = num_slots or self.DEFAULT_NUM_SLOTS
         self._shared = shared
         
-        self._free_bitmap = (1 << self._num_slots) - 1
+        #Allocation bitmap: bit=1 means slot is free
+        self._free_bitmap = (1 << self._num_slots) - 1  #All slots free
         
+        #Create storage
         buffer_size = self._num_slots * ARG_POOL_SLOT_SIZE
         
         if shared:
@@ -158,13 +161,27 @@ class ArgPool:
             self._slots = SlotArray()
             self.shm_name = None
         
+        #Initialize all slots
         for i in range(self._num_slots):
             self._slots[i].ref_count = 0
             self._slots[i].data_len = 0
         
+        #Lock for thread/process safety
         self._lock = Lock() if shared else None
     
     def store(self, data: bytes) -> int:
+        '''
+        Store argument data in pool.
+        
+        Args:
+            data: Argument bytes (max 252 bytes)
+            
+        Returns:
+            Pool slot ID (0 to num_slots-1), or -1 if pool full
+            
+        Raises:
+            ValueError: If data too large
+        '''
         if len(data) > self.MAX_DATA_SIZE:
             raise ValueError(format_error(
                 ErrorCode.E004_INVALID_BATCH_SIZE,
@@ -172,10 +189,12 @@ class ArgPool:
                 f"Arg data too large: {len(data)} > {self.MAX_DATA_SIZE}"
             ))
         
+        #Find free slot
         slot_id = self._alloc_slot()
         if slot_id < 0:
             return -1  #Pool full
         
+        #Store data
         slot = self._slots[slot_id]
         slot.ref_count = 1
         slot.data_len = len(data)
@@ -184,6 +203,15 @@ class ArgPool:
         return slot_id
     
     def retrieve(self, slot_id: int) -> Optional[bytes]:
+        '''
+        Retrieve argument data from pool.
+        
+        Args:
+            slot_id: Pool slot ID
+            
+        Returns:
+            Argument bytes, or None if invalid slot
+        '''
         if slot_id < 0 or slot_id >= self._num_slots:
             return None
         
@@ -194,10 +222,17 @@ class ArgPool:
         return bytes(slot.data[:slot.data_len])
     
     def add_ref(self, slot_id: int):
+        '''Increment reference count for slot.'''
         if 0 <= slot_id < self._num_slots:
             self._slots[slot_id].ref_count += 1
     
     def release(self, slot_id: int):
+        '''
+        Decrement reference count and free slot if zero.
+        
+        Args:
+            slot_id: Pool slot ID
+        '''
         if slot_id < 0 or slot_id >= self._num_slots:
             return
         
@@ -208,6 +243,7 @@ class ArgPool:
                 self._free_slot(slot_id)
     
     def _alloc_slot(self) -> int:
+        '''Allocate a free slot. Returns slot_id or -1 if full.'''
         if self._lock:
             self._lock.acquire()
         
@@ -227,6 +263,7 @@ class ArgPool:
                 self._lock.release()
     
     def _free_slot(self, slot_id: int):
+        '''Mark slot as free.'''
         if self._lock:
             self._lock.acquire()
         
@@ -237,9 +274,11 @@ class ArgPool:
                 self._lock.release()
     
     def get_free_count(self) -> int:
+        '''Get number of free slots.'''
         return bin(self._free_bitmap).count('1')
     
     def cleanup(self):
+        '''Release shared memory.'''
         if self._shared and hasattr(self, '_shm'):
             try:
                 self._shm.close()
@@ -249,18 +288,21 @@ class ArgPool:
 
 
 #============================================================
-# HELPERS
+# HELPER FUNCTIONS
 #============================================================
 def create_arg_parser(terminator: bytes = b'\x00', 
                       delimiter: bytes = b' ') -> ArgParser:
+    '''Create an argument parser with custom delimiters.'''
     return ArgParser(terminator=terminator, delimiter=delimiter)
 
 
 def pack_args(*args, encoding: str = 'utf-8') -> bytes:
+    '''Quick helper to pack string arguments.'''
     parser = ArgParser()
     return parser.pack_str(list(args), encoding)
 
 
 def unpack_args(c_args: bytes, encoding: str = 'utf-8') -> List[str]:
+    '''Quick helper to unpack c_args to strings.'''
     parser = ArgParser()
     return parser.parse_as_str(c_args, encoding)

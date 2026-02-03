@@ -1,10 +1,16 @@
 # ============================================================
 # TASKS.PY
 # ============================================================
+# Task handlers and dispatch system.
+# Maps fn_id to handler functions that workers execute.
+#
+# Each handler receives: (worker_id, slot, context) -> (success, result)
+# ============================================================
 
 import ctypes
 from typing import Callable, Dict, Any, Tuple, Optional
 from enum import IntEnum
+
 from slot import ProcTaskFnID, TaskSlot128, SlotVariant
 from args import ArgParser, unpack_args
 
@@ -31,7 +37,12 @@ class TaskResult:
 # TASK CONTEXT
 #============================================================
 class TaskContext:
+    '''
+    Context passed to task handlers.
+    Contains worker state and utilities.
+    '''
     __slots__ = ('worker_id', 'arg_parser', 'log_func', 'arg_pool', 'extra')
+    
     def __init__(self, 
                  worker_id: int,
                  arg_parser: ArgParser = None,
@@ -62,15 +73,21 @@ TaskHandler = Callable[[Any, TaskContext], TaskResult]
 
 #============================================================
 # BUILT-IN TASK HANDLERS
-# RIGHT NOW MOSTLY USED FOR DEBUGGING
 #============================================================
 
 def handle_terminate(slot, ctx: TaskContext) -> TaskResult:
+    '''Handle TERMINATE signal. Returns success to mark completion.'''
     ctx.log(f"TERMINATE received tsk_id={slot.tsk_id}")
     return TaskResult(success=True, value="terminated")
 
 
 def handle_increment(slot, ctx: TaskContext) -> TaskResult:
+    '''
+    Simple increment task.
+    args[0] = value to increment
+    args[1] = increment amount (default: 1)
+    Returns: incremented value
+    '''
     value = slot.args[0] if slot.args[0] != 0 else 0
     increment = slot.args[1] if slot.args[1] != 0 else 1
     result = value + increment
@@ -80,6 +97,12 @@ def handle_increment(slot, ctx: TaskContext) -> TaskResult:
 
 
 def handle_add(slot, ctx: TaskContext) -> TaskResult:
+    '''
+    Add two numbers.
+    args[0] = a
+    args[1] = b
+    Returns: a + b
+    '''
     a = slot.args[0]
     b = slot.args[1]
     result = a + b
@@ -89,6 +112,12 @@ def handle_add(slot, ctx: TaskContext) -> TaskResult:
 
 
 def handle_multiply(slot, ctx: TaskContext) -> TaskResult:
+    '''
+    Multiply two numbers.
+    args[0] = a
+    args[1] = b
+    Returns: a * b
+    '''
     a = slot.args[0]
     b = slot.args[1]
     result = a * b
@@ -98,6 +127,11 @@ def handle_multiply(slot, ctx: TaskContext) -> TaskResult:
 
 
 def handle_hash(slot, ctx: TaskContext) -> TaskResult:
+    '''
+    Compute simple hash of args.
+    Uses all non-zero args values.
+    Returns: hash value
+    '''
     import hashlib
     
     data = b''
@@ -113,8 +147,11 @@ def handle_hash(slot, ctx: TaskContext) -> TaskResult:
     return TaskResult(success=True, value=hash_val)
 
 
-#### SIMPLE EXAMPLE TASKS THAT PRATICALLY DO NOTHING BUT FLUSH 
 def handle_echo_cargs(slot, ctx: TaskContext) -> TaskResult:
+    '''
+    Echo c_args content (for CHAR_ARGS slots).
+    Parses and logs the arguments.
+    '''
     if not hasattr(slot, 'c_args'):
         return TaskResult(success=False, error="Slot has no c_args field")
     
@@ -130,6 +167,10 @@ def handle_status_report(slot, ctx: TaskContext) -> TaskResult:
 
 
 def handle_flush(slot, ctx: TaskContext) -> TaskResult:
+    '''
+    Default flush handler - just logs task info.
+    Used for debugging/testing.
+    '''
     ctx.log(f"FLUSH: tsk_id={slot.tsk_id} fn_id={slot.fn_id:#06x}")
     return TaskResult(success=True)
 
