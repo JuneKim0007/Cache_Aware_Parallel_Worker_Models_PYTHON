@@ -7,9 +7,8 @@
 4. [Data Structures](#4-data-structures)
 5. [Workflow](#5-workflow)
 6. [Memory Model](#6-memory-model)
-8. [Error Handling](#7-error-handling)
-9. [API Reference](8-api-reference)
-10. [Usage Examples](#9-examples)
+7. [Error Handling](#7-error-handling)
+8. [Usage Examples](#8-examples)
 
 ---
 
@@ -56,7 +55,7 @@ It bypasses Python's GIL limitation by using separate processes with shared memo
 
 ---
 
-## 3. Slot Structure
+## 3. Slot Structures
 
 ### slot.py 
 | Structure | Size | Variant | Description |
