@@ -150,24 +150,25 @@ For more detailed information refer to this [link](https://avc-1.gitbook.io/ring
 
 ---
 
-## 8.Examples
+## 8. Examples
 
 ### Basic Usage
 ```python
   def main():
-  app = MpopApi(
-  debug=True,
-  debug_delay=0.05,
-  )
-  app.print_status(config=True, queue=True, workers=True)
-  for i in range(100):
-  app.enqueue(
-  fn_id=ProcTaskFnID.INCREMENT,
-  args=(i * 10, 1),
-  tsk_id=i + 1,
-  )
-  app.run()
-  return
+    app = MpopApi(
+      debug=True,
+      debug_delay=0.05,
+    )
+    app.print_status(config=True, queue=True, workers=True)
+
+    for i in range(100):
+      app.enqueue(
+      fn_id=ProcTaskFnID.INCREMENT,
+      args=(i * 10, 1),
+      tsk_id=i + 1,
+      )
+    app.run()
+    return
 
   if name == "main":
   exit(main())
