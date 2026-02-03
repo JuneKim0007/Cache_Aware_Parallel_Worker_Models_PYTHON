@@ -186,32 +186,26 @@ cleanup() -> None
 ## 9. Usage Examples
 
 ### Basic Usage
-```python
 
-##TODO: have to define handler logic!!!
-##      ALSO READ ME UPDATE ONCE DONE.
+from api import MpopApi, ProcTaskFnID
 
-from slot import TaskSlot128, ProcTaskFnID
-from allocation import allocate_system, start_workers, join_workers
 
-#Allocate
-queue, status_shm, procs, log_q, _, _ = allocate_system(num_workers=4)
+def main():
+    app = MpopApi(
+        debug=True,
+        debug_delay=0.05,
+    )
+    app.print_status(config=True, queue=True, workers=True)
+    for i in range(100):
+        app.enqueue(
+            fn_id=ProcTaskFnID.INCREMENT,
+            args=(i * 10, 1),
+            tsk_id=i + 1,
+        )
+    app.run()
+    return
 
-#Enqueue tasks
-for i in range(100):
-    t = TaskSlot128()
-    t.tsk_id = i
-    t.fn_id = ProcTaskFnID.INCREMENT
-    queue.enqueue(t)
 
-#Terminate
-for i in range(4):
-    t = TaskSlot128()
-    t.fn_id = ProcTaskFnID.TERMINATE
-    queue.enqueue(t)
-#Init
-start_workers(procs)
-join_workers(procs)
-```
-
+if __name__ == "__main__":
+    exit(main())
 ---
