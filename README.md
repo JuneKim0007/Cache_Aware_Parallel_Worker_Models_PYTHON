@@ -3,13 +3,13 @@
 ## Table of Contents
 1. [Overview](#1-overview)
 2. [Architecture](#2-architecture)
-3. [Core Components](#3-core-components)
+3. [Core Components](#3-slot-structures)
 4. [Data Structures](#4-data-structures)
 5. [Workflow](#5-workflow)
 6. [Memory Model](#6-memory-model)
 8. [Error Handling](#7-error-handling)
 9. [API Reference](8-api-reference)
-10. [Usage Examples](#9-usage-examples)
+10. [Usage Examples](#9-examples)
 
 ---
 
@@ -56,21 +56,9 @@ It bypasses Python's GIL limitation by using separate processes with shared memo
 
 ---
 
-## 3. Core Components
+## 3. Slot Structure
 
-### File Structure
-```
-project/
-├── slot.py          # Slot definitions
-├── queues.py        # LocalTaskQueue, SharedTaskQueue definitions
-├── worker.py        # Worker class definitions
-├── allocation.py    # allocation for better usages
-├── errors.py        # Error codes, validation helpers
-├── main.py          # Example usage; right now the supervisor is not separated.
-└── README.md        # You are here.
-```
-
-### slot.py - Slot Types
+### slot.py 
 | Structure | Size | Variant | Description |
 |-----------|------|---------|-------------|
 | TaskSlot128 | 128B | INT_ARGS | Numeric arguments |
@@ -166,26 +154,23 @@ For more detailed information refer to this [link](https://avc-1.gitbook.io/ring
 ## 8.Examples
 
 ### Basic Usage
+```python
+  def main():
+  app = MpopApi(
+  debug=True,
+  debug_delay=0.05,
+  )
+  app.print_status(config=True, queue=True, workers=True)
+  for i in range(100):
+  app.enqueue(
+  fn_id=ProcTaskFnID.INCREMENT,
+  args=(i * 10, 1),
+  tsk_id=i + 1,
+  )
+  app.run()
+  return
 
-from api import MpopApi, ProcTaskFnID
-
-
-`def main():
-    app = MpopApi(
-        debug=True,
-        debug_delay=0.05,
-    )
-    app.print_status(config=True, queue=True, workers=True)
-    for i in range(100):
-        app.enqueue(
-            fn_id=ProcTaskFnID.INCREMENT,
-            args=(i * 10, 1),
-            tsk_id=i + 1,
-        )
-    app.run()
-    return
-
-
-if __name__ == "__main__":
-    exit(main())`
+  if name == "main":
+  exit(main())
+```
 ---
