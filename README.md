@@ -163,34 +163,14 @@ For more detailed information refer to this [link](https://avc-1.gitbook.io/ring
 
 ---
 
-## 8. API References 
-### allocate_system()
-```python
-allocate_system(
-    num_workers: int,           # 1-64
-    queue_slots: int = 256,     # Power of 2
-    slot_class = TaskSlot128,
-    debug_task_delay: float = 0.0
-) -> (queue, status_shm, processes, log_queue, lock, batch_lock)
-```
-
-### MPSharedTaskQueue
-```python
-enqueue(slot) -> bool       # False if full
-get_actual_occupancy() -> int
-cleanup() -> None
-```
-
----
-
-## 9. Usage Examples
+## 8.Examples
 
 ### Basic Usage
 
 from api import MpopApi, ProcTaskFnID
 
 
-def main():
+`def main():
     app = MpopApi(
         debug=True,
         debug_delay=0.05,
@@ -207,5 +187,5 @@ def main():
 
 
 if __name__ == "__main__":
-    exit(main())
+    exit(main())`
 ---
