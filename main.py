@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-# ============================================================
-# MAIN.PY - Usage Examples
-# ============================================================
-
-import warnings
-warnings.filterwarnings("ignore", message=".*resource_tracker.*")
 
 from api import MpopApi, ProcTaskFnID
 
@@ -12,7 +5,6 @@ from api import MpopApi, ProcTaskFnID
 def main():
 
     #example
-    
     app = MpopApi(
         debug=True,
         debug_delay=0.05,
@@ -25,10 +17,8 @@ def main():
             args=(i * 10, 1),
             tsk_id=i + 1,
         )
-    
     app.run()
     return
-
 
 
 if __name__ == "__main__":
