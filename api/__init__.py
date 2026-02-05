@@ -44,7 +44,6 @@ from .allocation import (
 
 from .supervisor import (
     SupervisorController,
-    SupervisorDisplay,
 )
 
 from .worker import (
@@ -66,6 +65,15 @@ from .args import (
     ArgParser,
 )
 
+from .registry import (
+    FunctionRegistry,
+    ArgsPool,
+    FunctionEntry,
+    RegistryError,
+    ArgValidationError,
+    FunctionNotFoundError,
+)
+
 from .errors import (
     ErrorCode,
     Component,
@@ -77,10 +85,13 @@ __all__ = [
     #Slots
     'TaskSlot128', 'TaskSlot196', 'TaskSlot128_cargs', 'TaskSlot196_cargs',
     'ProcTaskFnID', 'SlotVariant',
+    #Registry
+    'FunctionRegistry', 'ArgsPool', 'FunctionEntry',
+    'RegistryError', 'ArgValidationError', 'FunctionNotFoundError',
     #Advanced
     'SharedTaskQueue', 'LocalTaskQueue',
     'allocate', 'cleanup', 'AllocationResult',
-    'SupervisorController', 'SupervisorDisplay',
+    'SupervisorController',
     'WorkerStatusStruct', 'STATE_INIT', 'STATE_RUNNING', 'STATE_IDLE', 'STATE_TERMINATED', 'STATE_NAMES',
     'TaskDispatcher', 'TaskResult', 'TaskContext',
     'ArgParser',
