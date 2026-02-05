@@ -127,9 +127,7 @@ def allocate(num_workers: int,
 def cleanup(queue: SharedTaskQueue, status_shm: SharedMemory):
     queue.cleanup()
     try:
+        status_shm.close()
         status_shm.unlink()
-    except:
+    except Exception:
         pass
-    status_shm._mmap = None
-    status_shm._buf = None
-    status_shm._name = None
