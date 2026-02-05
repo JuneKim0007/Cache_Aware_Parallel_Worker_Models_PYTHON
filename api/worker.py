@@ -244,6 +244,20 @@ def worker_process_entry(ctx: WorkerContext):
         if state.active_worker_count > 0:
             state.active_worker_count -= 1
     
+    # Delete buffer references before exit
+    del slots
+    del state
+    del status_array
+    del my_status
+    
+    # Close shared memory
+    try:
+        shm_slots.close()
+        shm_state.close()
+        shm_status.close()
+    except Exception:
+        pass
+    
     try:
         sys.stderr = open(os.devnull, 'w')
     except:

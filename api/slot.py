@@ -72,7 +72,7 @@ class TaskSlot196_cargs(ctypes.Structure):
     '''196-byte task slot with char+int arguments.'''
     _align_ = 196
     _fields_ = [
-        ("tsk_id", ctypes.c_uint32),
+        ("tsk_id", ctypes.c_uint32,),
         ("fn_id", ctypes.c_uint32),
         ("args", ctypes.c_int64 * 5),
         ("c_args", ctypes.c_char * 84),

@@ -202,14 +202,20 @@ class SharedTaskQueue:
                 state.active_worker_count -= 1
 
     def cleanup(self):
+        # Delete local references first
+        del self.slots
+        del self._state
+        
+        # Close then unlink
         for shm in [self._shm_slots, self._shm_state]:
             try:
-                shm.unlink()
-            except:
+                shm.close()
+            except Exception:
                 pass
-            shm._mmap = None
-            shm._buf = None
-            shm._name = None
+            try:
+                shm.unlink()
+            except Exception:
+                pass
 
 
 #============================================================
