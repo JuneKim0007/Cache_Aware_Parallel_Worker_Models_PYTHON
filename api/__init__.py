@@ -63,6 +63,7 @@ from .tasks import (
 
 from .args import (
     ArgParser,
+    unpack_args,
 )
 
 from .registry import (
@@ -94,6 +95,6 @@ __all__ = [
     'SupervisorController',
     'WorkerStatusStruct', 'STATE_INIT', 'STATE_RUNNING', 'STATE_IDLE', 'STATE_TERMINATED', 'STATE_NAMES',
     'TaskDispatcher', 'TaskResult', 'TaskContext',
-    'ArgParser',
+    'ArgParser', 'unpack_args',
     'ErrorCode', 'Component',
 ]
