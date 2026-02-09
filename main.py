@@ -1,99 +1,65 @@
 #!/usr/bin/env python3
+import sys
+sys.path.insert(0, '/mnt/project')
+
+from api import MpopApi, TaskResult
+
+
+# User must define a handler logic
+# Example 1 Multiplication: x*y
+def multiply_handler(slot, ctx):
+    '''Multiply two numbers from slot.args'''
+    a = slot.args[0]
+    b = slot.args[1]
+    result = a * b
+    
+    if ctx.log_func:
+        ctx.log_func(f"{a} * {b} = {result}")
+    
+    return TaskResult(success=True, value=result)
+
+# Example 2: Computing b^exp.
+def power_handler(slot, ctx):
+    '''Raise to power'''
+    base = slot.args[0]
+    exp = slot.args[1]
+    result = base ** exp
+    
+    if ctx.log_func:
+        ctx.log_func(f"{base} ** {exp} = {result}")
+    
+    return TaskResult(success=True, value=result)
+
+
+# Export handlers
+HANDLERS = {
+    0x8000: multiply_handler,
+    0x8001: power_handler,
+}
+
+
 # ============================================================
-# MAIN.PY - Usage Examples
+# STEP 2: Use with MpopApi
 # ============================================================
-
-import warnings
-warnings.filterwarnings("ignore", message=".*resource_tracker.*")
-
-import time
-from api import MpopApi, ProcTaskFnID
-
-
-def main():
-    app = MpopApi(
-        workers=4,
-        queue_slots=1024,
-        display=True,
-        auto_terminate=True,
-        debug_delay=0.05,
-    )
-    
-    for i in range(100):
-        app.enqueue(
-            fn_id=ProcTaskFnID.INCREMENT,
-            args=(i * 10, 1),
-            tsk_id=i + 1,
-        )
-    
-    return app.run()
-
-
-def dynamic_example():
-    app = MpopApi(
-        workers=4,
-        queue_slots=256,
-        display=True,
-        auto_terminate=True,
-        debug_delay=0.05,
-    )
-    
-    # Task iterator
-    tasks = iter(range(100))
-    
-    def enqueue_next():
-        for _ in range(10):
-            try:
-                i = next(tasks)
-                app.enqueue(args=(i * 10, 1), tsk_id=i + 1)
-            except StopIteration:
-                return False
-        time.sleep(0.1)
-        return True
-    return app.run(enqueue_callback=enqueue_next)
-
-
-def nodisplay_example():
-    
-    app = MpopApi(
-        workers=4,
-        queue_slots=256,
-        display=False,  # Suppress TTY
-        auto_terminate=True,
-    )
-    
-    for i in range(50):
-        app.enqueue(args=(i, 1), tsk_id=i + 1)
-    
-    return app.run()
-
-
-def simple_example():
-    
-    app = MpopApi.simple(workers=2, display=False)
-    
-    for i in range(20):
-        app.enqueue(args=(i, 1), tsk_id=i + 1)
-    
-    return app.run()
-
 
 if __name__ == "__main__":
-    import sys
+    # Pass this file as handler module
+    app = MpopApi(
+        workers=4,
+        display=True,
+        handler_module=__name__,
+        debug_delay=0.05,     # Optional!
+    )
     
-    cmds = {
-        '--simple': simple_example,
-        '--dynamic': dynamic_example,
-        '--nodisplay': nodisplay_example,
-    }
+    print("Enqueueing tasks...")
     
-    if len(sys.argv) > 1:
-        cmd = sys.argv[1]
-        if cmd in cmds:
-            exit(cmds[cmd]())
-        else:
-            print(f"Unknown: {cmd}")
-            print(f"Usage: python main.py [{' | '.join(cmds.keys())}]")
-            exit(1)
-    else:
-        exit(main())
+    for i in range(10):
+        app.enqueue(fn_id=0x8000, args=(i, 10), tsk_id=i)
+    
+    for i in range(2, 6):
+        app.enqueue(fn_id=0x8001, args=(i, 3), tsk_id=i + 100)
+    
+    print("Running workers...")
+    app.run()
+    
+    print("\n✅ Done! Custom handlers executed in parallel.")
