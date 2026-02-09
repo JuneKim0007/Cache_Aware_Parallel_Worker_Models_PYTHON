@@ -66,7 +66,8 @@ class WorkerContext:
                  debug_task_delay: float = 0.0,
                  admin_frequency: int = 5,
                  arg_terminator: bytes = b'\x00',
-                 arg_delimiter: bytes = b' '):
+                 arg_delimiter: bytes = b' ',
+                 handler_module: str = None):
         self.worker_id = worker_id
         self.consumer_id = consumer_id
         self.shm_slots_name = shm_slots_name
@@ -83,6 +84,7 @@ class WorkerContext:
         self.admin_frequency = admin_frequency
         self.arg_terminator = arg_terminator
         self.arg_delimiter = arg_delimiter
+        self.handler_module = handler_module
 
 
 #============================================================
@@ -136,6 +138,24 @@ def worker_process_entry(ctx: WorkerContext):
     
     dispatcher = TaskDispatcher()
     arg_parser = ArgParser(terminator=ctx.arg_terminator, delimiter=ctx.arg_delimiter)
+    
+    # Load custom handlers from user module
+    if ctx.handler_module:
+        try:
+            import importlib
+            mod = importlib.import_module(ctx.handler_module)
+            
+            if hasattr(mod, 'HANDLERS'):
+                for fn_id, handler in mod.HANDLERS.items():
+                    dispatcher.register(fn_id, handler)
+                ctx.log_queue.put((ctx.worker_id, f"Loaded {len(mod.HANDLERS)} handlers from {ctx.handler_module}"))
+            elif hasattr(mod, 'register_handlers'):
+                mod.register_handlers(dispatcher)
+                ctx.log_queue.put((ctx.worker_id, f"Registered handlers via {ctx.handler_module}.register_handlers()"))
+            else:
+                ctx.log_queue.put((-1, f"[Warning] {ctx.handler_module} has no HANDLERS dict or register_handlers()"))
+        except Exception as e:
+            ctx.log_queue.put((-1, f"[Error] Failed to load {ctx.handler_module}: {e}"))
     
     tasks_since_admin = 0
     admin_freq = ctx.admin_frequency
