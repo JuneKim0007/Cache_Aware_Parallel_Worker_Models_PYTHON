@@ -49,7 +49,8 @@ def allocate(num_workers: int,
              queue_name: str = "shared_queue",
              debug_task_delay: float = 0.0,
              admin_frequency: int = 5,
-             handler_module: str = None) -> AllocationResult:
+             handler_module: str = None,
+             worker_batch_size: int = 256) -> AllocationResult:
     
     err = validate_num_workers(num_workers)
     if err:
@@ -109,7 +110,8 @@ def allocate(num_workers: int,
             supervisor_pid=supervisor_pid,
             debug_task_delay=debug_task_delay,
             admin_frequency=admin_frequency,
-            handler_module=handler_module
+            handler_module=handler_module,
+            worker_batch_size=worker_batch_size
         )
         p = Process(target=worker_process_entry, args=(ctx,))
         processes.append(p)
