@@ -67,7 +67,8 @@ class WorkerContext:
                  admin_frequency: int = 5,
                  arg_terminator: bytes = b'\x00',
                  arg_delimiter: bytes = b' ',
-                 handler_module: str = None):
+                 handler_module: str = None,
+                 worker_batch_size: int = 256):
         self.worker_id = worker_id
         self.consumer_id = consumer_id
         self.shm_slots_name = shm_slots_name
@@ -85,6 +86,7 @@ class WorkerContext:
         self.arg_terminator = arg_terminator
         self.arg_delimiter = arg_delimiter
         self.handler_module = handler_module
+        self.worker_batch_size = worker_batch_size
 
 
 #============================================================
@@ -133,7 +135,7 @@ def worker_process_entry(ctx: WorkerContext):
     my_status.local_queue_count = 0
     my_status.completed_tasks = 0
     
-    max_batch = 16
+    max_batch = ctx.worker_batch_size
     local_queue = LocalTaskQueue(_num_slots=max_batch, slot_class=slot_class)
     
     dispatcher = TaskDispatcher()
