@@ -48,7 +48,8 @@ def allocate(num_workers: int,
              slot_class: Type[ctypes.Structure] = TaskSlot128,
              queue_name: str = "shared_queue",
              debug_task_delay: float = 0.0,
-             admin_frequency: int = 5) -> AllocationResult:
+             admin_frequency: int = 5,
+             handler_module: str = None) -> AllocationResult:
     
     err = validate_num_workers(num_workers)
     if err:
@@ -107,7 +108,8 @@ def allocate(num_workers: int,
             log_queue=log_queue,
             supervisor_pid=supervisor_pid,
             debug_task_delay=debug_task_delay,
-            admin_frequency=admin_frequency
+            admin_frequency=admin_frequency,
+            handler_module=handler_module
         )
         p = Process(target=worker_process_entry, args=(ctx,))
         processes.append(p)
