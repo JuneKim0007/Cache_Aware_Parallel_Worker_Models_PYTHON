@@ -1,12 +1,6 @@
 # ============================================================
 # API/MPOP.PY
 # ============================================================
-# MpopApi: Primary user-facing entry point.
-# 
-# Central flow:
-#   __init__() -> all config
-#   run()      -> execute (single user-facing method)
-# ============================================================
 
 import ctypes
 from typing import Type, Optional, Dict, Any, Callable, Union, List
@@ -68,6 +62,7 @@ class MpopApi:
                  
                  delimiter: str = ' ',
                  handler_module: str = None,
+                 worker_batch_size: int = 16,
                  
                  poll_interval: float = 0.05,
                  idle_check_interval: int = 10,
@@ -90,6 +85,7 @@ class MpopApi:
             
             delimiter: c_args parsing delimiter (default: space)
             handler_module: Python module name with HANDLERS dict (e.g., "my_handlers")
+            worker_batch_size: How many tasks each worker grabs at once (default: 16)
             
             poll_interval: Display update interval
             idle_check_interval: Check terminate every N polls
@@ -108,6 +104,7 @@ class MpopApi:
         self._queue_name = queue_name
         self._validate = validate
         self._handler_module = handler_module
+        self._worker_batch_size = worker_batch_size
         
         # Get slot capacities
         slot_instance = self._slot_class()
