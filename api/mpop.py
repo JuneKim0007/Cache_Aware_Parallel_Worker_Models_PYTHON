@@ -30,34 +30,27 @@ class ValidationError(ArgValidationError):
 #============================================================
 class MpopApi:
     '''
-    Primary user-facing API.
+    Primary user-facing API for parallel task processing.
     
-    Central flow:
-        1. __init__(): All configuration (display, workers, etc.)
-        2. enqueue(): Add tasks (before run)
-        3. run(): Execute until completion
-    
-    Function Registration:
-        app.register(handler, name="my_func", arg_count=2)
-        app.set_var("config", {"key": "value"})
-        app.enqueue(fn_id=fn_id, args=(1,2), c_args="var:config")
-    
-    Usage:
-        # Simple
-        app = MpopApi(workers=4)
-        for i in range(100):
-            app.enqueue(args=(i, 1))
-        app.run()
+    Usage with custom handlers:
+        # my_handlers.py
+        def my_handler(slot, ctx):
+            return TaskResult(success=True, value=slot.args[0] * 2)
         
-        # With custom function
-        app = MpopApi(workers=4)
-        fn_id = app.register(my_handler, name="compute")
-        app.enqueue(fn_id=fn_id, args=(10,))
-        app.run()
+        HANDLERS = {0x8000: my_handler}
         
-        # With variable reference
-        app.set_var("data", [1,2,3,4,5])
-        app.enqueue(fn_id=fn_id, c_args="var:data")
+        # main.py
+        app = MpopApi(workers=4, handler_module="my_handlers")
+        app.enqueue(fn_id=0x8000, args=(10,))
+        app.run()
+    
+    Shared memory:
+        app.share("config", {"key": "value"})
+        app.enqueue(c_args="shared:config")
+    
+    Built-in handlers:
+        from api import ProcTaskFnID
+        app.enqueue(fn_id=ProcTaskFnID.INCREMENT, args=(i, 1))
     '''
     
     DEFAULT_SLOT = TaskSlot128_cargs
@@ -67,20 +60,15 @@ class MpopApi:
                  queue_slots: int = 4096,
                  slot_class: Type[ctypes.Structure] = None,
                  
-                 # Display: True (default) shows TTY, False suppresses
                  display: bool = True,
-                 
-                 # Auto terminate when idle
                  auto_terminate: bool = True,
                  
-                 # Debug
                  debug: bool = False,
                  debug_delay: float = 0.0,
                  
-                 # Parser delimiter for c_args
                  delimiter: str = ' ',
+                 handler_module: str = None,
                  
-                 # Advanced
                  poll_interval: float = 0.05,
                  idle_check_interval: int = 10,
                  queue_name: str = "mpop",
@@ -95,13 +83,13 @@ class MpopApi:
             slot_class: Task slot type (default: TaskSlot128_cargs)
             
             display: Show TTY display (default: True)
-            
             auto_terminate: Terminate when queue empty and idle (default: True)
             
             debug: Enable debug mode
             debug_delay: Delay per task (seconds)
             
             delimiter: c_args parsing delimiter (default: space)
+            handler_module: Python module name with HANDLERS dict (e.g., "my_handlers")
             
             poll_interval: Display update interval
             idle_check_interval: Check terminate every N polls
@@ -119,6 +107,7 @@ class MpopApi:
         self._idle_check_interval = idle_check_interval
         self._queue_name = queue_name
         self._validate = validate
+        self._handler_module = handler_module
         
         # Get slot capacities
         slot_instance = self._slot_class()
@@ -146,6 +135,7 @@ class MpopApi:
             queue_name=self._queue_name,
             debug_task_delay=self._debug_delay,
             admin_frequency=self._idle_check_interval,
+            handler_module=self._handler_module,
         )
         
         self._supervisor = SupervisorController(
@@ -259,6 +249,53 @@ class MpopApi:
         return self._registry.get_var(name)
     
     #==========================================================
+    # SHARED MEMORY
+    #==========================================================
+    def share(self, name: str, value: Any):
+        '''
+        Share a value across all workers.
+        
+        Workers can access shared values via get_shared() in task handlers
+        or by using "shared:name" in c_args.
+        
+        Args:
+            name: Shared variable name
+            value: Any picklable value (int, list, dict, object, etc.)
+        
+        Example:
+            app.share("config", {"timeout": 30, "retries": 3})
+            app.share("counter", [0])
+            app.enqueue(c_args="shared:config")
+            
+            # In task handler
+            def my_handler(slot, ctx):
+                config = app.get_shared("config")
+                # Or resolve from c_args
+                config = ctx.registry.resolve_c_args(slot.c_args)
+        '''
+        self._registry.set_shared(name, value)
+    
+    def get_shared(self, name: str) -> Any:
+        '''
+        Get a shared value.
+        
+        Args:
+            name: Shared variable name
+            
+        Returns:
+            Shared value or None if not found
+        '''
+        return self._registry.get_shared(name)
+    
+    def has_shared(self, name: str) -> bool:
+        '''Check if shared variable exists.'''
+        return self._registry.has_shared(name)
+    
+    def list_shared(self) -> List[str]:
+        '''List all shared variable names.'''
+        return self._registry.list_shared()
+    
+    #==========================================================
     # ENQUEUE
     #==========================================================
     def enqueue(self,
@@ -274,7 +311,7 @@ class MpopApi:
         Args:
             fn_id: Function ID (default: INCREMENT)
             args: Integer arguments tuple
-            c_args: Char args (bytes, str, list, or "var:name")
+            c_args: Char args (bytes, str, list, "var:name", or "shared:name")
             tsk_id: Task ID
             blocking: Use blocking enqueue
             timeout: Timeout for blocking
@@ -284,6 +321,7 @@ class MpopApi:
             
         Special c_args:
             - "var:name": Reference to variable set with set_var()
+            - "shared:name": Reference to shared memory set with share()
             - Oversized c_args: Automatically stored in pool
         '''
         if fn_id is None:
@@ -382,6 +420,7 @@ class MpopApi:
             'workers': self._workers,
             'display': self._display,
             'registered_functions': len(self._registry),
+            'shared_variables': len(self._registry.list_shared()),
         }
     
     def print_status(self):
@@ -394,6 +433,7 @@ class MpopApi:
         print(f"Display: {s['display']}")
         print(f"Queue: {s['queue_occupancy']}/{s['queue_capacity']}")
         print(f"Registered functions: {s['registered_functions']}")
+        print(f"Shared variables: {s['shared_variables']}")
         print("=" * 50)
     
     def list_functions(self) -> List[Dict]:
