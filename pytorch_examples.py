@@ -337,21 +337,21 @@ if __name__ == "__main__":
         debug_delay=0.0, #
     )
     
-    print("\Ex 1. Image clarification")
+    print("\nEx 1. Image clarification")
     for i in range(50):
         app.enqueue(fn_id=0xB002, args=(i, 0), tsk_id=i)
     
-    print("\Ex 2. Word Processing")
+    print("\nEx 2. Word Processing")
     texts = ["hello world", "machine learning", "parallel processing",
              "deep learning", "neural networks"]
     for i, text in enumerate(texts * 4):
         app.enqueue(fn_id=0xB003, c_args=text.encode() + b'\x00', tsk_id=i + 100)
     
-    print("3. Ex 3. Object detection (30 images)")
+    print("\n Ex 3. Object detection (30 images)")
     for i in range(30):
         app.enqueue(fn_id=0xB004, args=(i, 0), tsk_id=i + 200)
     
-    print("4. Emotion analysis (40 texts)")
+    print("\n4. Emotion analysis (40 texts)")
     reviews = [
         b"This product is amazing!\x00",
         b"Terrible experience, would not recommend.\x00",
@@ -363,7 +363,7 @@ if __name__ == "__main__":
         app.enqueue(fn_id=0xB005, c_args=reviews[i % len(reviews)], tsk_id=i + 300)
     
    
-    print("\Ex 1. Image clarification")
+    print("\n Ex 1. Image clarification")
     for batch_size in [1, 4, 8, 16, 32]:
         for i in range(3):
             app.enqueue(fn_id=0xB007, args=(batch_size, i), tsk_id=i + 400 + batch_size * 10)
