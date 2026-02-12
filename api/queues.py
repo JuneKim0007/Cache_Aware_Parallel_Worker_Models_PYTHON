@@ -1,9 +1,6 @@
 # ============================================================
 # API/QUEUES.PY
 # ============================================================
-# Queue implementations for multiprocessing task system.
-# ============================================================
-
 import ctypes
 import time
 from multiprocessing import Lock, Queue
