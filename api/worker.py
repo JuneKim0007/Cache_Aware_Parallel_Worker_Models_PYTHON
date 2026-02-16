@@ -47,8 +47,6 @@ STATE_NAMES = {
 
 # ============================================================
 # WORKER CONTEXT
-# CHANGES: ADDED __SLOT__ TO AVOID CREATING UNNECESSARY PYTHON
-#          ADDITIONAL DATA
 # ============================================================
 class WorkerContext:
     
@@ -184,7 +182,9 @@ def worker_process_entry(ctx: WorkerContext):
             ctx.log_queue.put((ctx.worker_id, msg))
             do_admin_check()
 
-    task_ctx = TaskContext(worker_id=ctx.worker_id, pool=None, log_func=throttled_log)
+    # Fixed: removed dead pool=None parameter
+    # extra={} provides mutable state bag for user handlers
+    task_ctx = TaskContext(worker_id=ctx.worker_id, log_func=throttled_log, extra={})
 
     task_delay = ctx.debug_task_delay
     consumer_bit = 1 << ctx.consumer_id
