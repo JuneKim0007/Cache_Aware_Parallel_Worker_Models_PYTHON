@@ -1,8 +1,8 @@
 # ============================================================
 # API/TASKS.PY
 # ============================================================
-# Task handlers and dispatcher.
-# ============================================================
+# THIS TASKS.PY IS MAINLY TO STORE INTERNAL AND NECESSARY TASKS 
+# SOME TASKS LIKE HASHING ARE UNNNECESSRAY BUT THERE FOR TEMPORAL USE.
 
 from typing import Callable, Dict, Any, Optional
 from dataclasses import dataclass
@@ -28,6 +28,7 @@ class TaskContext:
 
 #============================================================
 # BUILT-IN HANDLERS
+# some of them are used for testing purposes, will be removed later
 #============================================================
 def handle_terminate(slot, ctx: TaskContext) -> TaskResult:
     return TaskResult(success=True, value="TERMINATE")
@@ -62,9 +63,6 @@ def handle_default(slot, ctx: TaskContext) -> TaskResult:
     return TaskResult(success=True)
 
 
-#============================================================
-# TASK DISPATCHER
-#============================================================
 class TaskDispatcher:
     def __init__(self):
         self._handlers: Dict[int, Callable] = {
