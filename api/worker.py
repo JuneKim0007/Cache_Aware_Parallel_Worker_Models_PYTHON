@@ -182,8 +182,7 @@ def worker_process_entry(ctx: WorkerContext):
             ctx.log_queue.put((ctx.worker_id, msg))
             do_admin_check()
 
-    # Fixed: removed dead pool=None parameter
-    # extra={} provides mutable state bag for user handlers
+    #removed deal pool
     task_ctx = TaskContext(worker_id=ctx.worker_id, log_func=throttled_log, extra={})
 
     task_delay = ctx.debug_task_delay
