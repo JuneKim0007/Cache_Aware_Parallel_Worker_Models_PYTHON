@@ -82,9 +82,9 @@ class FunctionRegistry:
         "_slot_int_args", "_slot_c_args", "_delimiter",
         "_pool",
     )
-
-    FN_ID_USER_START = 0x8000
-    FN_ID_SYSTEM_END = 0x7FFF
+    #changed since i dont think i will have half of the space for internal task allocations
+    FN_ID_USER_START = 0x1000
+    FN_ID_SYSTEM_END = 0x0FFF
 
     def __init__(self,
                  slot_int_args: int = 2,
