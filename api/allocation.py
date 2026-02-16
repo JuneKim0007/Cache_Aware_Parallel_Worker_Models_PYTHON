@@ -1,7 +1,10 @@
 # ============================================================
 # API/ALLOCATION.PY
 # ============================================================
-# User-facing API for allocation.
+# Internal API handling STATIC ALLOCATION and CLEAN UP
+# THE DESIGN PRINCIPLE IS SIMPLE:
+# TO PUT EVERYTHING HEAVY TO BE STATICALLY ALLOCATED BEFORE THE
+# DESIRED MODEL ACTUALLY RUNS
 # ============================================================
 
 import os
