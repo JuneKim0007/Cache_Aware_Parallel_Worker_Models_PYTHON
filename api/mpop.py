@@ -87,6 +87,7 @@ class MpopApi:
             debug_task_delay=self._debug_delay,
             admin_frequency=self._idle_check_interval,
             handler_module=self._handler_module,
+            worker_batch_size = self._worker_batch_size
         )
         
         self._supervisor = SupervisorController(

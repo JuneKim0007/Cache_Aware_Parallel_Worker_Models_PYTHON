@@ -50,13 +50,13 @@ class AllocationResult:
 # ALLOCATE
 #============================================================
 def allocate(num_workers: int,
-             queue_slots: int = 256,
+             queue_slots: int = 96,
              slot_class: Type[ctypes.Structure] = TaskSlot128,
              queue_name: str = "shared_queue",
              debug_task_delay: float = 0.0,
              admin_frequency: int = 5,
              handler_module: str = None,
-             worker_batch_size: int = 256) -> AllocationResult:
+             worker_batch_size: int = 64) -> AllocationResult:
     
     err = validate_num_workers(num_workers)
     if err:

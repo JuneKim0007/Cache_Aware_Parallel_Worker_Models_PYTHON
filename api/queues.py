@@ -54,7 +54,7 @@ class LocalQueueState:
 # SHARED TASK QUEUE
 #============================================================
 class SharedTaskQueue:
-    DEFAULT_NUM_SLOTS = 256
+    DEFAULT_NUM_SLOTS = 4096
     
     def __init__(self,
                  queue_id: int,
@@ -219,7 +219,7 @@ class SharedTaskQueue:
 # LOCAL TASK QUEUE
 #============================================================
 class LocalTaskQueue:
-    DEFAULT_NUM_SLOTS = 256
+    DEFAULT_NUM_SLOTS = 96
 
     def __init__(self, _num_slots: int = None, slot_class=TaskSlot128):
         _num_slots = _num_slots or self.DEFAULT_NUM_SLOTS
