@@ -1,14 +1,6 @@
 # ============================================================
 # API/REGISTRY.PY
 # ============================================================
-# Function registry with args pool for oversized arguments.
-# 
-# Features:
-#   - Function ID registration with validation
-#   - Args pool for oversized c_args (>64 bytes)
-#   - Variable references (var:name)
-#   - Custom parser delimiter
-# ============================================================
 
 import ctypes
 from typing import Dict, Any, Callable, List, Union, Optional, Tuple
@@ -168,9 +160,6 @@ class FunctionRegistry:
     def pool(self) -> ArgsPool:
         return self._pool
     
-    #----------------------------------------------------------
-    # REGISTRATION
-    #----------------------------------------------------------
     def register(self,
                  handler: Callable,
                  name: str = None,
@@ -178,23 +167,6 @@ class FunctionRegistry:
                  arg_count: int = 0,
                  c_arg_max: int = None,
                  meta: Dict = None) -> int:
-        '''
-        Register a function handler.
-        
-        Args:
-            handler: Function(slot, ctx) -> Any
-            name: Function name (default: handler.__name__)
-            fn_id: Explicit fn_id (default: auto-assign from 0x8000)
-            arg_count: Expected int args count (0 = any)
-            c_arg_max: Max c_args before pool overflow (default: slot_c_args)
-            meta: Additional metadata
-            
-        Returns:
-            fn_id
-            
-        Raises:
-            RegistryError: If fn_id or name already registered
-        '''
         name = name or handler.__name__
         
         # Auto-assign fn_id if not provided
@@ -247,24 +219,13 @@ class FunctionRegistry:
         '''Get a named variable.'''
         return self._pool.get_var(name)
     
-    #----------------------------------------------------------
-    # ARGUMENT VALIDATION & PREPARATION
-    #----------------------------------------------------------
+    #Argument VALIDATION LOGIC (SHOULD BE TO BE STATIC!)
+    #THAT IS EITHER IT HAPPENS BEFORE CREATING USER FACING INSTANCES
+    # OR HAS TO DO ALL VALIDATION BEFORE WORKERS ARE ACTUALLY RUNNING.
     def validate_args(self,
                       fn_id: int,
                       args: tuple,
                       c_args: Union[bytes, str, List[str]] = None) -> Tuple[bool, str]:
-        '''
-        Validate arguments for a function.
-        
-        Args:
-            fn_id: Function ID
-            args: Integer arguments tuple
-            c_args: Char arguments
-            
-        Returns:
-            (valid, error_message)
-        '''
         entry = self.get(fn_id)
         
         # Check int args count
@@ -282,28 +243,7 @@ class FunctionRegistry:
                      args: tuple = (),
                      c_args: Union[bytes, str, List[str]] = None
                      ) -> Tuple[tuple, bytes, int]:
-        '''
-        Validate and prepare arguments for enqueueing.
-        
-        Handles:
-            - Int args validation
-            - c_args packing
-            - Oversized c_args -> pool
-            - Variable references (var:name)
-        
-        Args:
-            fn_id: Function ID
-            args: Integer arguments
-            c_args: Char arguments (bytes, str, list, or "var:name")
-            
-        Returns:
-            (int_args, packed_c_args, pool_id)
-            pool_id is 0 if no pool storage needed
-            
-        Raises:
-            ArgValidationError: If validation fails
-        '''
-        # Validate int args
+
         valid, err = self.validate_args(fn_id, args, c_args)
         if not valid:
             raise ArgValidationError(err)
@@ -317,12 +257,7 @@ class FunctionRegistry:
         return args, packed_c_args, pool_id
     
     def _process_c_args(self, c_args: Union[bytes, str, List[str]]) -> Tuple[bytes, int]:
-        '''
-        Process c_args, handling variable refs and overflow.
-        
-        Returns:
-            (packed_bytes, pool_id)
-        '''
+
         pool_id = 0
         
         # Handle variable reference
@@ -356,17 +291,7 @@ class FunctionRegistry:
         return packed, pool_id
     
     def resolve_c_args(self, c_args: bytes) -> Any:
-        '''
-        Resolve c_args, fetching from pool if needed.
-        
-        Called by worker to get actual data.
-        
-        Args:
-            c_args: Packed c_args from slot
-            
-        Returns:
-            Resolved data (bytes, or pool object)
-        '''
+
         # Check for pool reference
         try:
             text = c_args.rstrip(b'\x00').decode('utf-8')
@@ -378,32 +303,13 @@ class FunctionRegistry:
         
         return c_args
     
-    #----------------------------------------------------------
-    # DISPATCH
-    #----------------------------------------------------------
     def dispatch(self, fn_id: int, slot, ctx) -> Any:
-        '''
-        Dispatch to registered handler.
-        
-        Args:
-            fn_id: Function ID
-            slot: Task slot
-            ctx: Task context
-            
-        Returns:
-            Handler result
-            
-        Raises:
-            FunctionNotFoundError: If fn_id not registered
-        '''
+
         handler = self.get_handler(fn_id)
         if handler is None:
             raise FunctionNotFoundError(f"fn_id {fn_id:#06x} not registered")
         return handler(slot, ctx)
     
-    #----------------------------------------------------------
-    # INFO
-    #----------------------------------------------------------
     def list_functions(self) -> List[Dict]:
         '''List all registered functions.'''
         return [
