@@ -1,156 +1,160 @@
 # Multiprocessing Task Queue System - Documentation
 
-## Table of Contents
-1. [Overview](#1-overview)
-2. [Architecture](#2-architecture)
-3. [Core Components](#3-slot-structures)
-4. [Data Structures](#4-data-structures)
-5. [Workflow](#5-workflow)
-6. [Memory Model](#6-memory-model)
-7. [Error Handling](#7-error-handling)
-8. [Usage Examples](#8-examples)
+The API provides a **single-producer, multiple-consumer** task queue parallel worker model in Python.
 
+The main goal of this is simple: to keep workers busy and use memory efficiently.
+
+The Core design components are:
+ - Enhancing worker Utilization time.
+ - Tightly compacting any meta, coordiation data rooted from managing multi processes
+ - Monitor and detect issues using supervisor process. 
+
+--- 
+
+## OverView
+
+The process model is simply (supervisor, a set of workers) pair.\
+Supervisor is mainly responsible for spawning/despawning, adminstrating, and logging worker processes, while workes are mainly responsible for executing tasks.\
+For efficiency supervisor could run in minimal mode, in that case refer to supervisor section.
+
+[image]
+
+
+### Scheduling Method
+Scheduling method is designed to increase each worker utilization time mainly by reducing lock contention cost among worker.\
+The scheduling method primarly uses batching and range-claiming dequeuing tactics using bitmap(bitset) are coordination layers.\
+The method is completely internal but for anyone curious, please refer to this [link]().
+
+--- 
+## Worker
+
+A worker is a single process spawned by the supervisor (or an entrypoint process).\
+Each worker is bound to a shared task queue and maintains its own local queue, which stores tasks fetched from the shared queue.
+
+Workers may fetch duplicate tasks from the shared queue by design.\
+The rationales behind this design are simple:
+ - To support dynamic request handling and administrative operations
+ - To allow the supervisor to efficiently block incoming requests when the shared queue is full
+
+This additional abstraction layer not only simplifies the supervisor’s blocking efficiency but also improve blocking logic:\
+Rather than continuously polling individual workers to allocate tasks, the supervisor only needs to enqueue tasks 
+into the shared queue when space becomes available in the shared queue.
+
+The worker implicitly receives three pieces of information to process tasks: Function ID, Arguments, and Meta Data.\
+I will unpack them shortly but keep in mind that those three informations are: 
+ - Function ID – a mapping value that tells the worker which function to execute.
+ - Arguments – the values to pass to the function when it runs.
+ - Meta Data – intended to carry timestamps, logging information, etc. Though it is currently unimplemented. (Refer to Road Map)
 ---
+### Shared Queue and Local Queue
 
-## 1. Overview
+## Shared Queue:
+Shared queue is the queue shared among multiple workers (Note: worker can be singular but there would be almost no pratical needs for singular worker).\
+The Shared Queue is really nothing fancy but simply an array that stores each data describing how workers should execute tasks.
 
-This API provides a **single-producer, multiple-consumer** task queue parallel worker model in Python. 
-It bypasses Python's GIL limitation by using separate processes with shared memory for communication.
+Mainly, the shared queue has by default 4096 slots for the shared queue. 
 
-### Key Features
-- Process-level parallelism (bypasses Python GIL)
-- Batch range-claiming for shared Queue
-- Cache-line aligned structures (64 bytes) for cache-awareness
-- Configurable slot types (INT_ARGS vs CHAR_ARGS)
-- Supervisor Process
+However to change the size of the shared queue, however, one can simply write:
 
----
+`
+    app = MpopApi(
+       queue_slots: int = 4096*2
+    )
+`
 
-## 2. Architecture
+**WARNING** THE SLOT SIZE MUST BE POWER OF 2; Otherwise, the supervisor will refuse to allocate the shared queue.
+
+### Slots:
+Slots are elements of a fixed-size array. You can think of it like a C array, for example:
+`
+Slot arr[49];
+`
+which creates 50 Slot elements within an array.
+
+Each slot primarily stores four categories of variables:
+ - tsk_id – Identifier variable used for debugging purposes (the value can be ignored and that case by default will be put 0)\
+ - fn_id – identifies which function to execute\
+ - args – the argument values for the function\
+ - meta – additional metadata (e.g., timestamps, logs)
+Once Mpop creates a slot, both worker's local and shared queue share the same slot type which are fixed and unchangable.
+this memory inflexibility is primarly due to the trade off between making worker and task processing to be cpu-aware by trying to control memory layout by 64 bytes.
+
+By default Mpop uses 196_cargs slot element to store information. However, you can always change it by telling Mpop to create a queue of different slot types.
+For instance:
 
 ```
-┌────────────────────────────────────────────────────────────
-| SUPERVISOR[EntryPoint] (main.py)                          |
-|  Creates shared memory regions                            |
-|  Spawns worker processes via fork()                       |
-|  Enqueues tasks (producer role)                           |
-|  Reads worker status for display                          |
-└────────────────────────────────────────────────────────────
-                              │ fork()
-                              ▼
-┌────────────────────────────────────────────────────────────
-│                    SHARED MEMORY                          │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │Shared Queues │  │  Supervisor  │  │ Worker Stats │     │
-│  │              │  │  References  │  |              │     │
-│  └──────────────┘  └──────────────┘  └──────────────┘     │
-└────────────────────────────────────────────────────────────
-                              │ 
-        ---------------------------------------------
-        ▼                     ▼                     ▼
-┌───────────────┐    ┌───────────────┐       ┌───────────────┐
-│   Worker 0    │    │   Worker 1    │  ...  │   Worker N    │
-└───────────────┘    └───────────────┘       └───────────────┘
+    app = MpopApi(
+       queue_slots: int = 4096*2,
+       slot_class: Type[ctypes.Structure] = TaskSlot128
+    )
 ```
 
----
-
-## 3. Slot Structures
-
-### slot.py 
-| Structure | Size | Variant | Description |
-|-----------|------|---------|-------------|
-| TaskSlot128 | 128B | INT_ARGS | Numeric arguments |
-| TaskSlot196 | 196B | INT_ARGS | More args |
-| TaskSlot128_cargs | 128B | CHAR_ARGS | String arguments |
-| TaskSlot196_cargs | 196B | CHAR_ARGS | Larger strings |
-
----
-
-## 4. Data Structures
-
-### SharedQueueState (64 bytes)
-| Field | Type | Description |
-|-------|------|-------------|
-| head | uint32 | Consumer read position |
-| tail | uint32 | Producer write position |
-| _num_slots | uint32 | Queue capacity |
-| mask | uint32 | For modular arithmetic |
-| logical_occupancy | uint32 | Producer's view of occupancy |
-| active_batches | uint64 | Bitmap of active workers |
-| batch_accumulation_counter | uint32 | Slots in current batch cycle |
-| committed_accumulation | uint32 | Ready to reclaim |
-| is_committed | uint8 | Batch cycle complete flag |
-| num_batch_participants | uint8 | Current batch count |
-
-### WorkerStatusStruct (64 bytes, cache-line aligned)
-| Field | Type | Description |
-|-------|------|-------------|
-| state | uint8 | 0=INIT, 1=RUNNING, 2=IDLE, 3=TERMINATED |
-| local_queue_count | uint32 | Tasks in local buffer |
-| completed_tasks | uint32 | Total completed |
-
----
-
-## 5. Shared Queue Workflow
-
-### Batch Claiming Protocol
-For more detailed information refer to this [link](https://avc-1.gitbook.io/ringqueuebitmapbatchingamongmultipleconsumer/)
-
-**Claim (with lock):**
-1. Set bit in active_batches
-2. Check available slots
-3. Advance head, record batch range
-4. Increment accumulation counter
-
-**Process (no lock):**
-1. Copy to local buffer
-2. Process each task
-3. Update status
-
-**Finish (with lock):**
-1. Clear bit in active_batches
-2. If bitmap=0: commit accumulation
-
-**Producer Reclaim:**
-- On enqueue, if is_committed: reclaim committed slots
-
----
-
-## 6. Memory Model
-
-### Cache Line Strategy
-- Each WorkerStatusStruct occupies exactly one cache line (64 bytes)
-- Workers possesses a dedicated local queue of slots that are aligned to multiples of 64 bytes
-- Example: a 128-byte task slot is aligned to 128 bytes (2 cache lines)
-- Currently implementing more slot types.
-- Each slot starts at a cache-line boundary (typically 64byte), ensuring no two slots share a cache line
-- Workers only write to their own slot to avoid cache evictions and concurrency problems
-- Worker periodically write its state to a small shared buffer for supervisor to display and check.
-
----
-
-## 7. Error Handling
-
-### Error Format
+The structure of the default slot is:
+```class TaskSlot196_cargs(ctypes.Structure):
+    196-byte task slot with char+int arguments.
+    _align_ = 196
+    _fields_ = [
+        ("tsk_id", ctypes.c_uint32),
+        ("fn_id", ctypes.c_uint32),
+        ("args", ctypes.c_int64 * 5),
+        ("c_args", ctypes.c_char * 92),  
+        ("meta", ctypes.c_uint8 * 56),
+    ]
 ```
-[Error: E{code:03d}][{component}] {message}
+Right now you may want to directly refer to slot.py to see the structure
+However, later I will document different slot types and structure.
+
+### Creating handler and Enqueuing Task:
+
+The multi processing models are often complex to implement 
+To manage the complexity created due to managing multi process, this API uses advantage of handler functions that are somewhat indirect way to pass tasks to workers.
+For example:
+
+```
+def some_function_handler(slot: TaskSlot196):
+    arg1 = slot.args[0]
+    arg2 = slot.args[1] if len(slot.args) > 1 else 1
+    <Function LOGIC>
+    return TaskResult(success=True, value=result)
 ```
 
-### Error Codes
-| Code | Description |
-|------|-------------|
-| E001 | Queue full |
-| E002 | Invalid num_slots |
-| E003 | num_workers > 64 |
-| E011 | Invalid consumer_id |
-| E021 | Shared memory failed |
-| E022 | Process spawn failed |
-| E031 | Unknown slot_class |
+Once you've created the handler function you can simply create a registry
+```
+HANDLERS = {
+    0xB000: some_function_handler
+}
+```
+Registry is simply a set of key, value pairs (fn_id, function()).
+Remember Workers take fn_id to figure out which functions to actually run.
+This design was intentional to reduce the size of the slot for memory efficiency:\
+while Queues can store fn_id which are only 4 Hexadecimal values (2 bytes), the actual function definition will be stored only once in the memory.
 
----
+Once you've created a registry, you can simply let shared queue to enqueue tasks.\
+For instance:
+```
+app.enqueue(fn_id=0xB002, args=(i, 0), tsk_id=i)
+```
 
-## 8. Examples
+Now the shared queue allocate tasks and the task is available for the worker to use:
+
+However, due to the slot being fixed size (multiples of 64 bytes), in general arguments are not going to fit; 
+in this case consider using bigger slots, or using argument pools that store reference to the lengthy argument.
+
+** Due to the slot being fixed size (multiples of 64 bytes), in general not all arguments are not going to fit; 
+I’m currently designing an argument pool that stores mappings to lengthy variables.
+
+## Supervisor
+The supervisor process is responsible for managing and administering worker processes while handling incoming requests to enqueue tasks into the Shared Queue.\
+
+The design principles are:
+- Providing a user-facing process that exposes visibility into the internal state of the system
+- Providing user-facing interfaces for debugging and logging
+- Providing user-facing administrative controls, including spawning and terminating workers
+- Internally handling both static and dynamic request for enqueuing the task into the Shared Queue.
+
+However, the supervisor introduces a potential single point of failure. If the supervisor is abruptly terminated, workers perform periodic health checks; upon detecting that the supervisor is no longer alive, they also terminate.\
+I am currently designing a recovery mechanism to handle supervisor failure, but this has been quite challenging because recovery requires a reliable method to re-link a newly created supervisor with existing workers, which introduces coordination and state-reconciliation problems. Please refer to the Roadmap.
+
 
 ### Basic Usage
 ```python
