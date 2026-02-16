@@ -1,13 +1,38 @@
-# Multiprocessing Task Queue System - Documentation
+# Multiprocessing of Python (MPOP)- Documentation
 
-The API provides a **single-producer, multiple-consumer** task queue parallel worker model in Python.
+## Overview
 
-The main goal of this is simple: to keep workers busy and use memory efficiently.
+The Mpop API provides a single-producer multiple-consumer task-queue model mainly desigend for high-throughput, CPU-bound workloads in Python.
 
-The Core design components are:
- - Enhancing worker Utilization time.
- - Tightly compacting any meta, coordiation data rooted from managing multi processes
- - Monitor and detect issues using supervisor process. 
+It focuses on making multiprocessing faster, simpler, and more predictable, while still supporting dynamic task enqueuing and basic orchestration tools.
+
+Mpop offers a clean, familiar user facing API that handles the hard parts internally to support better development. 
+
+### Why mpop?
+
+Mpop is mainly built to assist developers to have better experiences in Python multiprocessing while providing competetive performance.\
+The specific benefits Mpop provides are:
+ - Higher throughput than Python’s standard multiprocessing module even with additional coordination layer!
+ - Simpler process management through a unified shared queue
+ - Easier customization of flow-control features.
+ - Supervisor process support for logging, monitoring, and administration for each processes.
+
+### Core Design Principles and How It Works
+
+Mpop's design principle involves two things:
+ - No unncessary complication
+ - Keep static allocation heavy, make runtime light.
+
+That is Mpop is designed to support developability while moving as much work as possible to initialization time to reduce runtime overhead.
+
+How did Mpop acheive that?
+
+ - A custom shared queue designed to maximize process utilization time \
+ - Reduced reliance on Python’s dynamic features where performance matters\
+ - A user-facing API that stays simple, while complexity is handled internally
+
+The result is a multiprocessing system that is both fast and intuitive to use! 
+To see this please refer to Benchmark section
 
 --- 
 
@@ -183,7 +208,40 @@ I am currently designing a recovery mechanism to handle supervisor failure, but 
     exit(main())
 ```
 ---
+## Bench Mark
 
+Benchmark Mechanism:
+
+- The benchmark compares mpop against Python’s standard multiprocessing module under two conditions: statically allocated jobs and dynamic job request incoming.\
+- A baseline implementation that was being compared was written using only Python standard libraries.\
+- Spawning worker time were excluded from both benchmarks. (because Mpop is to reduce dynamic time while static allocation is heavy)\That is the benchmark start time is recorded when all worker processes are signalled to run for both files.\
+- Mpop was run in max_performance mode, which disables optional layers such as logging to ensure a fair comparison.
+- Both ran on virtual machine hosted by Cloud service and on my local machine
+
+
+### Result
+
+
+**Uniform Workloads**
+
+- **900 tasks:** Standard multi-threading completed in ~0.00845s s, dynamic scheduling ~0.00890s s, Mpop: ~0.049 s. Slightly slower for very small tasks.\
+- **9,000 tasks:** Standard ~0.08842s s, dynamic ~0.07862s, Mpop ~0.08267s s. Performance matches dynamic scheduling. \
+- **90,000 tasks:** Standard ~.84855s s, dynamic ~0.80830s, Mpop ~0.81982s s. Nearly identical to dynamic scheduling.  
+- **1,800,000 tasks:** Standard ~4.51 s, dynamic ~4.24 s, Mpop ~4.26 s. Nearly identical to dynamic scheduling.  
+
+**Takeaways:**  
+- Traditional multi-threading is slightly faster for very small workloads.  
+- Our supervisor-managed system avoids workers blocking each other, keeping performance predictable.  
+- Scales well to tens of thousands of tasks while maintaining near-optimal efficiency.  
+
+      
+### Interpretation
+Mpop design is to maximum process to stay in a core that was spawned. 
+
+Overall, mpop demonstrates at least 97% of 
+### Interpretation and Concerns:
+
+---
 ## Road Map
 - Argument Pool: Implementing a pool for storing lengthy arguments and user-facing functions for integrating handler validation and creating a registry.
 - Meta Data: Building a meta section to support timestamping, flexible logging such as no log, detailed log, and better control.
