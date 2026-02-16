@@ -1,19 +1,20 @@
-# ============================================================
-# API/ERRORS.PY
-# ============================================================
-# Error codes and validation utilities.
-# ============================================================
+#=============================================================
+# ERRORS.PY
+#=============================================================
+# Changelog: moved errors scattered across the file into this file.
 
 from enum import IntEnum
 from typing import Optional
 
 
 class Component:
+    __slots__ = ()
     SHARED_QUEUE = "SharedQueue"
     LOCAL_QUEUE = "LocalQueue"
     WORKER = "Worker"
     ALLOCATION = "Allocation"
     SUPERVISOR = "Supervisor"
+    REGISTRY = "Registry"
 
 
 class ErrorCode(IntEnum):
@@ -27,6 +28,19 @@ class ErrorCode(IntEnum):
     E021_SHM_ALLOC_FAILED = 21
     E022_PROCESS_SPAWN_FAILED = 22
     E023_INVALID_SLOT_CLASS = 23
+
+
+class RegistryError(Exception):
+    """Base registry error."""
+    __slots__ = ()
+
+class ArgValidationError(RegistryError):
+    """Argument validation failed."""
+    __slots__ = ()
+
+class FunctionNotFoundError(RegistryError):
+    """Function ID not registered."""
+    __slots__ = ()
 
 
 def format_error(code: ErrorCode, component: str, message: str) -> str:
