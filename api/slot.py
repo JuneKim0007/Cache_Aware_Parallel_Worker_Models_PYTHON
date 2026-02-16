@@ -9,29 +9,25 @@ from typing import Type
 
 #============================================================
 # TASK FUNCTION ID
+# Internal Range is defined as: 0x0000 - 0x0FFF
+# User range is any values above 0x1000
 #============================================================
 class ProcTaskFnID(IntEnum):
     TERMINATE     = 0x0000
-    READ_FILE     = 0x1000
-    READ_DIR      = 0x1100
-    HASH          = 0x2000
-    INCREMENT     = 0x2100
-    ADD           = 0x2200
-    MULTIPLY      = 0x2300
-    STATUS_REPORT = 0xF000
+    READ_FILE     = 0x0100
+    READ_DIR      = 0x0110
+    HASH          = 0x0200
+    INCREMENT     = 0x0210
+    ADD           = 0x0220
+    MULTIPLY      = 0x0230
+    STATUS_REPORT = 0x0F00
 
-
-#============================================================
-# SLOT VARIANT
-#============================================================
+#may not need it 
 class SlotVariant(IntEnum):
     INT_ARGS  = 0x00
     CHAR_ARGS = 0x01
 
 
-#============================================================
-# SLOT STRUCTURES
-#============================================================
 class TaskSlot128(ctypes.Structure):
     '''128-byte task slot with integer arguments.'''
     _align_ = 128
