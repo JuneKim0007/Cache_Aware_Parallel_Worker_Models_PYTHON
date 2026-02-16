@@ -1,24 +1,13 @@
 # ============================================================
 # API/__INIT__.PY
 # ============================================================
-# Public API exports.
-#
-# Primary entry point: MpopApi (alias: Mpop)
-# Internal/Advanced: allocate, SharedTaskQueue, etc.
-# ============================================================
 
-#----------------------------------------------------------
-# PRIMARY USER API
-#----------------------------------------------------------
 from .mpop import (
     MpopApi,
     Mpop,
     ValidationError,
 )
 
-#----------------------------------------------------------
-# SLOTS
-#----------------------------------------------------------
 from .slot import (
     TaskSlot128,
     TaskSlot196,
@@ -28,9 +17,14 @@ from .slot import (
     SlotVariant,
 )
 
-#----------------------------------------------------------
-# ADVANCED / INTERNAL
-#----------------------------------------------------------
+from .errors import (
+    ErrorCode,
+    Component,
+    RegistryError,
+    ArgValidationError,
+    FunctionNotFoundError,
+)
+
 from .queues import (
     SharedTaskQueue,
     LocalTaskQueue,
@@ -70,31 +64,24 @@ from .registry import (
     FunctionRegistry,
     ArgsPool,
     FunctionEntry,
-    RegistryError,
-    ArgValidationError,
-    FunctionNotFoundError,
-)
-
-from .errors import (
-    ErrorCode,
-    Component,
 )
 
 __all__ = [
-    #Primary
+    # Primary
     'MpopApi', 'Mpop', 'ValidationError',
-    #Slots
+    # Slots
     'TaskSlot128', 'TaskSlot196', 'TaskSlot128_cargs', 'TaskSlot196_cargs',
     'ProcTaskFnID', 'SlotVariant',
-    #Registry
-    'FunctionRegistry', 'ArgsPool', 'FunctionEntry',
+    # Errors (single source)
+    'ErrorCode', 'Component',
     'RegistryError', 'ArgValidationError', 'FunctionNotFoundError',
-    #Advanced
+    # Registry
+    'FunctionRegistry', 'ArgsPool', 'FunctionEntry',
+    # Internal
     'SharedTaskQueue', 'LocalTaskQueue',
     'allocate', 'cleanup', 'AllocationResult',
     'SupervisorController',
     'WorkerStatusStruct', 'STATE_INIT', 'STATE_RUNNING', 'STATE_IDLE', 'STATE_TERMINATED', 'STATE_NAMES',
     'TaskDispatcher', 'TaskResult', 'TaskContext',
     'ArgParser', 'unpack_args',
-    'ErrorCode', 'Component',
 ]
