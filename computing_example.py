@@ -7,39 +7,23 @@ import math
 import hashlib
 import struct
 
-## SOME AI GENERATED TESTINGS TO VERIFY WORKABILITY 
-# ============================================================
-# HANDLERS
-# 0x1100 - matrix_multiply
-# 0x1101 - prime_factorize
-# 0x1102 - monte_carlo_pi
-# 0x1103 - hash_chunk
-# 0x1104 - token_frequency
-# 0x1105 - collatz_length
-# 0x1106 - sort_generate
-# 0x1107 - checksum_block
-# ============================================================
 
 def matrix_multiply_handler(slot, ctx):
-    """Dense NxN matrix multiply (pure python). args[0]=N, args[1]=seed."""
     n = slot.args[0]
     seed = slot.args[1]
 
-    # deterministic fill
     def fill(n, s):
         m = []
         v = s
         for i in range(n):
             row = []
             for j in range(n):
-                v = (v * 6364136223846793005 + 1) & 0xFFFFFFFF
+                v = (v * 12345678901234 + 1) & 0xFFFFFFFF
                 row.append((v >> 16) & 0xFF)
             m.append(row)
         return m
-
     a = fill(n, seed)
     b = fill(n, seed + 1)
-
     c = [[0]*n for _ in range(n)]
     for i in range(n):
         ai = a[i]
@@ -59,7 +43,6 @@ def matrix_multiply_handler(slot, ctx):
 
 
 def prime_factorize_handler(slot, ctx):
-    """Factorize a large-ish number. args[0]=base, args[1]=offset."""
     base = slot.args[0]
     offset = slot.args[1]
     n = abs(base * 1000003 + offset) | 1  # ensure odd and large-ish
@@ -82,7 +65,6 @@ def prime_factorize_handler(slot, ctx):
 
 
 def monte_carlo_pi_handler(slot, ctx):
-    """Estimate pi via random sampling. args[0]=num_samples, args[1]=seed."""
     samples = slot.args[0]
     seed = slot.args[1]
 
@@ -190,7 +172,6 @@ def sort_generate_handler(slot, ctx):
 
 
 def checksum_block_handler(slot, ctx):
-    """CRC32-style rolling checksum. args[0]=block_size, args[1]=iterations."""
     block_size = max(slot.args[0], 64)
     iterations = max(slot.args[1], 1)
 
@@ -232,10 +213,6 @@ HANDLERS = {
     0x1107: checksum_block_handler,
 }
 
-
-# ============================================================
-# LOREM CHUNKS (for token_frequency tasks)
-# ============================================================
 _LOREM = [
     b"lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua\x00",
     b"ut enim ad minim veniam quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat\x00",
@@ -257,7 +234,14 @@ if __name__ == "__main__":
         handler_module=__name__,
         debug_delay= 0.003
     )
-
+    
+    print("="*50)
+    print("="*50)
+    print("Debug_delay is set to 0.003 second for each task")
+    
+    print("="*50)
+    
+    print("="*50)
     # 1. matrix multiply 32x32, 200 tasks with varying seeds
     for i in range(200):
         app.enqueue(fn_id=0x1100, args=(32, i), tsk_id=i)
