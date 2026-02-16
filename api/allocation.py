@@ -24,6 +24,9 @@ from .errors import ErrorCode, Component, format_error, validate_num_slots, vali
 # ALLOCATION RESULT
 #============================================================
 class AllocationResult:
+    __slots__ = ("queue", "status_shm", "processes", "log_queue",
+                 "num_workers", "lock", "batch_lock")
+
     def __init__(self,
                  queue: SharedTaskQueue,
                  status_shm: SharedMemory,
