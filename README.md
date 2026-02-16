@@ -31,7 +31,7 @@ The method is completely internal but for anyone curious, please refer to this [
 A worker is a single process spawned by the supervisor (or an entrypoint process).\
 Each worker is bound to a shared task queue and maintains its own local queue, which stores tasks fetched from the shared queue.
 
-Workers may fetch duplicate tasks from the shared queue by design.\
+Workers fetch tasks from the shared queue and store the duplicate information into its local queue by design.\
 The rationales behind this design are simple:
  - To support dynamic request handling and administrative operations
  - To allow the supervisor to efficiently block incoming requests when the shared queue is full
@@ -46,9 +46,10 @@ I will unpack them shortly but keep in mind that those three informations are:
  - Arguments – the values to pass to the function when it runs.
  - Meta Data – intended to carry timestamps, logging information, etc. Though it is currently unimplemented. (Refer to Road Map)
 ---
-### Shared Queue and Local Queue
 
-## Shared Queue:
+## Shared Queue and Local Queue
+
+### Shared Queue:
 Shared queue is the queue shared among multiple workers (Note: worker can be singular but there would be almost no pratical needs for singular worker).\
 The Shared Queue is really nothing fancy but simply an array that stores each data describing how workers should execute tasks.
 
@@ -63,6 +64,10 @@ However to change the size of the shared queue, however, one can simply write:
 `
 
 **WARNING** THE SLOT SIZE MUST BE POWER OF 2; Otherwise, the supervisor will refuse to allocate the shared queue.
+
+### Local Queue:
+Local queue is a queue only accessible by the worker process unless worker process fail and the supervisor gets noticed.
+Since the local queue is not shared among any other processes, worker would be more likely to have better access to 
 
 ### Slots:
 Slots are elements of a fixed-size array. You can think of it like a C array, for example:
@@ -178,3 +183,9 @@ I am currently designing a recovery mechanism to handle supervisor failure, but 
     exit(main())
 ```
 ---
+
+## Road Map
+- Argument Pool: Implementing a pool for storing lengthy arguments and user-facing functions for integrating handler validation and creating a registry.
+- Meta Data: Building a meta section to support timestamping, flexible logging such as no log, detailed log, and better control.
+- Error Recovery: Handling worker failures, health check, respawning.
+- Supervisor Recovery: Implementing mechanisms to respawn and reconnect the supervisor process after failure.
