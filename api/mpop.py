@@ -1,275 +1,304 @@
 # ============================================================
-# API/REGISTRY.PY
+# API/MPOP.PY
 # ============================================================
-# Changelog: changed the import issue
-
 import ctypes
-from typing import Dict, Any, Callable, List, Union, Optional, Tuple
-from multiprocessing import Manager
+from typing import Type, Optional, Dict, Any, Callable, Union, List
 
-from .errors import RegistryError, ArgValidationError, FunctionNotFoundError
-
-
-
-# Mainly to serve user facing Entry while providing:
-#   - Custom function registration 
-#   - Packing Lengthy argument               
-#   - Validating and detecting defects during allocation phase
-#     - that is checking valid fn_id and args
+from .slot import (TaskSlot128, TaskSlot128_cargs, ProcTaskFnID, has_char_args)
+from .queues import SharedTaskQueue
+from .allocation import allocate, AllocationResult
+from .supervisor import SupervisorController
+from .registry import FunctionRegistry
+from .errors import ArgValidationError, RegistryError
 
 
-class FunctionEntry:
-    """Registered function metadata. __slots__ — no __dict__."""
-    __slots__ = ("fn_id", "name", "handler", "arg_count", "c_arg_max", "meta")
+#============================================================
+# VALIDATION ERROR (re-export for compatibility)
+#============================================================
+class ValidationError(ArgValidationError):
+    __slots__ = ()
 
+
+#============================================================
+# MPOP API
+#============================================================
+class MpopApi:
+    
+    DEFAULT_SLOT = TaskSlot128_cargs
+    
     def __init__(self,
-                 fn_id: int,
-                 name: str,
-                 handler: Callable,
-                 arg_count: int = 0,
-                 c_arg_max: int = 64,
-                 meta: Dict[str, Any] = None):
-        self.fn_id = fn_id
-        self.name = name
-        self.handler = handler
-        self.arg_count = arg_count
-        self.c_arg_max = c_arg_max
-        self.meta = meta if meta is not None else {}
-
-
-class ArgsPool:
-    __slots__ = ("_use_manager", "_manager", "_pool", "_vars", "_next_id")
-
-    def __init__(self, use_manager: bool = True):
-        self._use_manager = use_manager
-        if use_manager:
-            self._manager = Manager()
-            self._pool: Dict[int, Any] = self._manager.dict()
-            self._vars: Dict[str, Any] = self._manager.dict()
-        else:
-            self._manager = None
-            self._pool: Dict[int, Any] = {}
-            self._vars: Dict[str, Any] = {}
-        self._next_id = 1
-
-    def store(self, data: Any) -> int:
-        pool_id = self._next_id
-        self._next_id += 1
-        self._pool[pool_id] = data
-        return pool_id
-
-    def retrieve(self, pool_id: int) -> Any:
-        return self._pool.get(pool_id)
-
-    def remove(self, pool_id: int):
-        if pool_id in self._pool:
-            del self._pool[pool_id]
-
-    def set_var(self, name: str, value: Any):
-        self._vars[name] = value
-
-    def get_var(self, name: str) -> Any:
-        return self._vars.get(name)
-
-    def has_var(self, name: str) -> bool:
-        return name in self._vars
-
-    def clear(self):
-        self._pool.clear()
-        self._vars.clear()
-        self._next_id = 1
-
-
-class FunctionRegistry:
-    __slots__ = (
-        "_functions", "_names", "_next_fn_id",
-        "_slot_int_args", "_slot_c_args", "_delimiter",
-        "_pool",
-    )
-    ## essential to avoid deleting 
-    FN_ID_USER_START = 0x8000
-    FN_ID_SYSTEM_END = 0x7FFF
-
-    def __init__(self,
-                 slot_int_args: int = 2,
-                 slot_c_args: int = 64,
-                 delimiter: str = ' '):
-        self._functions: Dict[int, FunctionEntry] = {}
-        self._names: Dict[str, int] = {}
-        self._next_fn_id = self.FN_ID_USER_START
-        self._slot_int_args = slot_int_args
-        self._slot_c_args = slot_c_args
-        self._delimiter = delimiter
-        self._pool = ArgsPool(use_manager=True)
-
+                 workers: int = 4,
+                 queue_slots: int = 4096,
+                 slot_class: Type[ctypes.Structure] = None,
+                 
+                 display: bool = True,
+                 auto_terminate: bool = True,
+                 
+                 debug: bool = False,
+                 debug_delay: float = 0.0,
+                 
+                 delimiter: str = ' ',
+                 handler_module: str = None,
+                 worker_batch_size: int = 16,
+                 
+                 poll_interval: float = 0.05,
+                 idle_check_interval: int = 10,
+                 queue_name: str = "mpop",
+                 validate: bool = True,
+                 ):
+        self._workers = workers
+        self._queue_slots = queue_slots
+        self._slot_class = slot_class or self.DEFAULT_SLOT
+        self._display = display
+        self._auto_terminate = auto_terminate
+        self._debug = debug
+        self._debug_delay = debug_delay if not debug else (debug_delay or 0.1)
+        self._poll_interval = poll_interval
+        self._idle_check_interval = idle_check_interval
+        self._queue_name = queue_name
+        self._validate = validate
+        self._handler_module = handler_module
+        self._worker_batch_size = worker_batch_size
+        
+        # Get slot capacities
+        slot_instance = self._slot_class()
+        self._slot_int_args = len(slot_instance.args)
+        self._slot_c_args = len(slot_instance.c_args) if has_char_args(self._slot_class) else 0
+        
+        # Function registry with args pool
+        self._registry = FunctionRegistry(
+            slot_int_args=self._slot_int_args,
+            slot_c_args=self._slot_c_args,
+            delimiter=delimiter,
+        )
+        
+        self._result: Optional[AllocationResult] = None
+        self._supervisor: Optional[SupervisorController] = None
+        
+        self._allocate()
+    
+    def _allocate(self):
+        '''Allocate resources.'''
+        self._result = allocate(
+            num_workers=self._workers,
+            queue_slots=self._queue_slots,
+            slot_class=self._slot_class,
+            queue_name=self._queue_name,
+            debug_task_delay=self._debug_delay,
+            admin_frequency=self._idle_check_interval,
+            handler_module=self._handler_module,
+        )
+        
+        self._supervisor = SupervisorController(
+            shared_queue=self._result.queue,
+            status_shm=self._result.status_shm,
+            processes=self._result.processes,
+            log_queue=self._result.log_queue,
+            num_workers=self._result.num_workers,
+            display=self._display,
+            auto_terminate=self._auto_terminate,
+            poll_interval=self._poll_interval,
+            idle_check_interval=self._idle_check_interval,
+        )
+    
+    #==========================================================
+    # PROPERTIES
+    #==========================================================
+    @property
+    def queue(self) -> SharedTaskQueue:
+        return self._result.queue
+    
+    @property
+    def slot_class(self) -> Type:
+        return self._slot_class
+    
+    @property
+    def num_workers(self) -> int:
+        return self._workers
+    
+    @property
+    def registry(self) -> FunctionRegistry:
+        '''Access to function registry.'''
+        return self._registry
+    
     @property
     def delimiter(self) -> str:
-        return self._delimiter
-
+        '''c_args parsing delimiter.'''
+        return self._registry.delimiter
+    
     @delimiter.setter
     def delimiter(self, value: str):
-        self._delimiter = value
-
-    @property
-    def pool(self) -> ArgsPool:
-        return self._pool
-
+        '''Set c_args parsing delimiter.'''
+        self._registry.delimiter = value
+    
+    #==========================================================
+    # FUNCTION REGISTRATION
+    #==========================================================
     def register(self,
                  handler: Callable,
                  name: str = None,
                  fn_id: int = None,
                  arg_count: int = 0,
-                 c_arg_max: int = None,
                  meta: Dict = None) -> int:
-        name = name or handler.__name__
-
-        if fn_id is None:
-            fn_id = self._next_fn_id
-            self._next_fn_id += 1
-
-        if fn_id in self._functions:
-            raise RegistryError(f"fn_id {fn_id:#06x} already registered")
-        if name in self._names:
-            raise RegistryError(f"Name '{name}' already registered")
-
-        entry = FunctionEntry(
-            fn_id=fn_id,
-            name=name,
+        return self._registry.register(
             handler=handler,
+            name=name,
+            fn_id=fn_id,
             arg_count=arg_count,
-            c_arg_max=c_arg_max or self._slot_c_args,
             meta=meta,
         )
-        self._functions[fn_id] = entry
-        self._names[name] = fn_id
-        return fn_id
-
-    def get(self, fn_id: int) -> Optional[FunctionEntry]:
-        return self._functions.get(fn_id)
-
-    def get_by_name(self, name: str) -> Optional[FunctionEntry]:
-        fn_id = self._names.get(name)
-        return self._functions.get(fn_id) if fn_id is not None else None
-
-    def get_handler(self, fn_id: int) -> Optional[Callable]:
-        entry = self._functions.get(fn_id)
-        return entry.handler if entry is not None else None
-
+    
+    def function(self, name: str = None, arg_count: int = 0):
+        def decorator(handler):
+            fn_id = self.register(handler, name=name or handler.__name__, arg_count=arg_count)
+            handler.fn_id = fn_id
+            return handler
+        return decorator
+    
+    #==========================================================
+    # VARIABLES
+    #==========================================================
     def set_var(self, name: str, value: Any):
-        self._pool.set_var(name, value)
-
+        self._registry.set_var(name, value)
+    
     def get_var(self, name: str) -> Any:
-        return self._pool.get_var(name)
-
-    def set_shared(self, name: str, value: Any):
-        self._pool.set_var(f"shared:{name}", value)
-
+        '''Get a named variable.'''
+        return self._registry.get_var(name)
+    
+    #==========================================================
+    # SHARED MEMORY
+    #==========================================================
+    def share(self, name: str, value: Any):
+        self._registry.set_shared(name, value)
+    
     def get_shared(self, name: str) -> Any:
-        return self._pool.get_var(f"shared:{name}")
-
+        '''Get a shared value.'''
+        return self._registry.get_shared(name)
+    
     def has_shared(self, name: str) -> bool:
-        return self._pool.has_var(f"shared:{name}")
-
+        '''Check if shared variable exists.'''
+        return self._registry.has_shared(name)
+    
     def list_shared(self) -> List[str]:
-        prefix = "shared:"
-        prefix_len = len(prefix)
-        return [k[prefix_len:] for k in self._pool._vars if isinstance(k, str) and k.startswith(prefix)]
-
-    #############
-    #############
-    #############
-    ##VALIDATION PHASE
-    #############
-    #############
-    #############
-    def validate_args(self,
-                      fn_id: int,
-                      args: tuple,
-                      c_args: Union[bytes, str, List[str]] = None) -> Tuple[bool, str]:
-        if len(args) > self._slot_int_args:
-            return False, f"Too many int args: {len(args)} > {self._slot_int_args}"
-
-        entry = self._functions.get(fn_id)
-        if entry is not None and entry.arg_count > 0 and len(args) != entry.arg_count:
-            return False, f"Expected {entry.arg_count} args, got {len(args)}"
-
-        return True, ""
-
-    def prepare_args(self,
-                     fn_id: int,
-                     args: tuple = (),
-                     c_args: Union[bytes, str, List[str]] = None
-                     ) -> Tuple[tuple, bytes, int]:
-        valid, err = self.validate_args(fn_id, args, c_args)
-        if not valid:
-            raise ArgValidationError(err)
-
-        pool_id = 0
-        packed_c_args = b''
-
-        if c_args is not None:
-            packed_c_args, pool_id = self._process_c_args(c_args)
-
-        return args, packed_c_args, pool_id
-
-    def _process_c_args(self, c_args: Union[bytes, str, List[str]]) -> Tuple[bytes, int]:
-        pool_id = 0
-
-        # Variable reference
-        if isinstance(c_args, str) and c_args.startswith('var:'):
-            var_name = c_args[4:]
-            value = self._pool.get_var(var_name)
-            if value is None:
-                raise ArgValidationError(f"Variable '{var_name}' not found")
-            pool_id = self._pool.store(value)
-            packed = f"pool:{pool_id}".encode('utf-8') + b'\x00'
-            return packed, pool_id
-
-        # Pack
-        if isinstance(c_args, str):
-            packed = c_args.encode('utf-8') + b'\x00'
-        elif isinstance(c_args, list):
-            delim = self._delimiter.encode('utf-8')
-            packed = delim.join(s.encode('utf-8') for s in c_args) + b'\x00'
+        '''List all shared variable names.'''
+        return self._registry.list_shared()
+    
+    #==========================================================
+    # ENQUEUE
+    #==========================================================
+    def enqueue(self,
+                fn_id: int = None,
+                args: tuple = (),
+                c_args: Union[bytes, str, List[str]] = None,
+                tsk_id: int = 0,
+                blocking: bool = False,
+                timeout: float = 10.0) -> bool:
+        if fn_id is None:
+            fn_id = ProcTaskFnID.INCREMENT
+        
+        # Prepare args (validates and handles pool/var refs)
+        if self._validate:
+            try:
+                args, packed_c_args, pool_id = self._registry.prepare_args(
+                    fn_id, args, c_args
+                )
+            except ArgValidationError as e:
+                raise ValidationError(str(e))
         else:
-            packed = c_args
-
-        # Overflow to pool
-        if len(packed) > self._slot_c_args:
-            pool_id = self._pool.store(packed)
-            packed = f"pool:{pool_id}".encode('utf-8') + b'\x00'
-
-        return packed, pool_id
-
-    def resolve_c_args(self, c_args: bytes) -> Any:
-        try:
-            text = c_args.rstrip(b'\x00').decode('utf-8')
-            if text.startswith('pool:'):
-                pool_id = int(text[5:])
-                return self._pool.retrieve(pool_id)
-        except Exception:
-            pass
-        return c_args
-
-    def dispatch(self, fn_id: int, slot, ctx) -> Any:
-        handler = self.get_handler(fn_id)
-        if handler is None:
-            raise FunctionNotFoundError(f"fn_id {fn_id:#06x} not registered")
-        return handler(slot, ctx)
-
+            # No validation, just pack
+            packed_c_args = b''
+            pool_id = 0
+            if c_args is not None:
+                if isinstance(c_args, str):
+                    packed_c_args = c_args.encode('utf-8') + b'\x00'
+                elif isinstance(c_args, list):
+                    packed_c_args = self._registry.delimiter.encode('utf-8').join(
+                        s.encode('utf-8') for s in c_args
+                    ) + b'\x00'
+                else:
+                    packed_c_args = c_args
+        
+        # Create slot
+        task = self._slot_class()
+        task.tsk_id = tsk_id
+        task.fn_id = fn_id
+        
+        # Set int args
+        for i, v in enumerate(args):
+            if i < len(task.args):
+                task.args[i] = v
+        
+        # Set pool_id in meta if used
+        if pool_id > 0:
+            task.meta[0] = pool_id & 0xFF
+            task.meta[1] = (pool_id >> 8) & 0xFF
+            task.meta[2] = (pool_id >> 16) & 0xFF
+            task.meta[3] = (pool_id >> 24) & 0xFF
+        
+        # Set c_args
+        if packed_c_args and has_char_args(self._slot_class):
+            task.c_args = packed_c_args[:len(task.c_args)]
+        
+        # Enqueue
+        if blocking:
+            return self._result.queue.enqueue_blocking(task, timeout)
+        return self._result.queue.enqueue(task)
+    
+    def enqueue_many(self, tasks: List[Dict], blocking: bool = False) -> int:
+        '''Enqueue multiple tasks. Returns count.'''
+        count = 0
+        for t in tasks:
+            if self.enqueue(
+                fn_id=t.get('fn_id'),
+                args=t.get('args', ()),
+                c_args=t.get('c_args'),
+                tsk_id=t.get('tsk_id', 0),
+                blocking=blocking,
+            ):
+                count += 1
+        return count
+    
+    def run(self, enqueue_callback: Callable = None) -> int:
+        return self._supervisor.run(enqueue_callback=enqueue_callback)
+    
+    def status(self) -> Dict:
+        '''Get current status.'''
+        return {
+            'queue_occupancy': self.queue.get_actual_occupancy(),
+            'queue_capacity': self._queue_slots,
+            'workers': self._workers,
+            'display': self._display,
+            'registered_functions': len(self._registry),
+            'shared_variables': len(self._registry.list_shared()),
+        }
+    
+    def print_status(self):
+        '''Print status.'''
+        s = self.status()
+        print("=" * 50)
+        print("MpopApi Status")
+        print("=" * 50)
+        print(f"Workers: {s['workers']}")
+        print(f"Display: {s['display']}")
+        print(f"Queue: {s['queue_occupancy']}/{s['queue_capacity']}")
+        print(f"Registered functions: {s['registered_functions']}")
+        print(f"Shared variables: {s['shared_variables']}")
+        print("=" * 50)
+    
     def list_functions(self) -> List[Dict]:
-        return [
-            {
-                'fn_id': e.fn_id,
-                'name': e.name,
-                'arg_count': e.arg_count,
-                'c_arg_max': e.c_arg_max,
-            }
-            for e in self._functions.values()
-        ]
+        '''List registered functions.'''
+        return self._registry.list_functions()
+    
+    @classmethod
+    def simple(cls, workers: int = 2, display: bool = False) -> 'MpopApi':
+        '''Create minimal instance.'''
+        return cls(workers=workers, queue_slots=256, display=display)
+    
+    @classmethod
+    def debug(cls, workers: int = 2, delay: float = 0.1) -> 'MpopApi':
+        '''Create debug instance.'''
+        return cls(workers=workers, debug=True, debug_delay=delay)
 
-    def __contains__(self, fn_id: int) -> bool:
-        return fn_id in self._functions
 
-    def __len__(self) -> int:
-        return len(self._functions)
+# Alias
+Mpop = MpopApi
