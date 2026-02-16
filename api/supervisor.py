@@ -1,8 +1,6 @@
 # ============================================================
 # API/SUPERVISOR.PY
 # ============================================================
-# Single central flow: run() handles everything.
-# ============================================================
 
 import sys
 import time
@@ -65,24 +63,20 @@ class _Display:
         self.queue_id = queue_id
         self.max_logs = max_logs
         
-        # Calculate fixed row positions
         self.title_row = 1
-        self.worker_header_row = 5
-        self.worker_start_row = 6
+        self.worker_header_row = 2
+        self.worker_start_row = 3
         self.footer_sep_row = self.worker_start_row + num_workers
         self.footer_row = self.footer_sep_row + 1
         self.log_label_row = self.footer_row + 2
         self.log_start_row = self.log_label_row + 1
         self.final_row = self.log_start_row + max_logs + 1
         
-        # Ring buffer for logs
         self.logs = []
-    
-    def init(self):
+        
         _hide_cursor()
         _clear_screen()
         
-        # Title section
         _move_cursor(self.title_row, 1)
         print("MultiProcessing Task Supervisor")
         print("-" * 70)
@@ -92,11 +86,6 @@ class _Display:
         # Worker header
         _move_cursor(self.worker_header_row, 1)
         print(f"{'worker_id':<12}{'state':<15}{'local_queue':<15}{'completed':<15}")
-        
-        # Worker rows (init)
-        for i in range(self.num_workers):
-            _move_cursor(self.worker_start_row + i, 1)
-            print(f"{i:<12}{'INIT':<15}{0:<15}{0:<15}")
         
         # Footer section
         _move_cursor(self.footer_sep_row, 1)
@@ -148,13 +137,9 @@ class _Display:
         _move_cursor(self.final_row, 1)
         _show_cursor()
 
-
-#============================================================
-# SUPERVISOR CONTROLLER
-#============================================================
 class SupervisorController:
     '''
-    Internal supervisor. All config in __init__, run() is the only method.
+    Internal supervisor.
     '''
     
     def __init__(self,
@@ -185,25 +170,17 @@ class SupervisorController:
         self._status_array = StatusArray.from_buffer(status_shm.buf)
     
     def run(self, enqueue_callback=None) -> int:
-        '''
-        Run until completion. Single user-facing method.
+
+        print("[WORKERS INITIALIZING]")
+        for i, p in enumerate(self.processes):
+            p.start()
+            print(f"  Worker [{i}] started")
+        print(f"[ALL {self.num_workers} WORKERS STARTED]")
+        print()
+        self._running = True
         
-        Args:
-            enqueue_callback: Optional func() called each loop for dynamic enqueue.
-                             Return False or raise StopIteration to stop calling.
-        
-        Returns:
-            Exit code (0=success, 1=interrupted)
-        '''
-        # Init display
         if self._display_enabled:
             self._display = _Display(self.num_workers, self.shared_queue.queue_id)
-            self._display.init()
-        
-        # Start workers
-        for p in self.processes:
-            p.start()
-        self._running = True
         
         exit_code = 0
         interrupted = False
@@ -319,10 +296,13 @@ class SupervisorController:
         total = 0
         for i in range(self.num_workers):
             s = self._status_array[i]
-            name = STATE_NAMES.get(s.state, "?")
-            print(f"Worker {i}: state={name}, completed={s.completed_tasks}")
             total += s.completed_tasks
-        print("-" * 50)
+            # Only print per-worker breakdown when TTY display was not active
+            if not self._display_enabled:
+                name = STATE_NAMES.get(s.state, "?")
+                print(f"Worker {i}: state={name}, completed={s.completed_tasks}")
+        if not self._display_enabled:
+            print("-" * 50)
         print(f"Total completed: {total}")
         print(f"Debug counter:   {self.shared_queue.get_debug_counter()}")
         print("=" * 50)
@@ -331,13 +311,10 @@ class SupervisorController:
         print()
         print("Cleaning up...")
         
-        # Delete local references to shared memory views
         del self._status_array
         
-        # Small delay to ensure worker processes have fully exited
         time.sleep(0.1)
         
-        # Now safe to cleanup
         self.shared_queue.cleanup()
         try:
             self.status_shm.close()
