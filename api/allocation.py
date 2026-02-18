@@ -1,139 +1,113 @@
 # ============================================================
 # API/ALLOCATION.PY
 # ============================================================
-# Internal API handling STATIC ALLOCATION and CLEAN UP
-# THE DESIGN PRINCIPLE IS SIMPLE:
-# TO PUT EVERYTHING HEAVY TO BE STATICALLY ALLOCATED BEFORE THE
-# DESIRED MODEL ACTUALLY RUNS
-# ============================================================
 
 import os
 import ctypes
-from multiprocessing import Process, Lock, Queue
+from multiprocessing import Process
 from multiprocessing.shared_memory import SharedMemory
-from typing import Type
 
-from .slot import TaskSlot128
+from .config import MpopConfig, SyncGroup, SharedRefs
 from .queues import SharedTaskQueue
 from .worker import (WorkerContext, WorkerStatusStruct, worker_process_entry,
-                     STATE_INIT, WORKER_STATUS_SIZE)
-from .errors import ErrorCode, Component, format_error, validate_num_slots, validate_num_workers
+                     STATE_INIT, WORKER_STATUS_SIZE,
+                     STATUS_ARRAY_TYPE, STATUS_ARRAY_SIZE)
 
 
-#============================================================
-# ALLOCATION RESULT
-#============================================================
 class AllocationResult:
-    __slots__ = ("queue", "status_shm", "processes", "log_queue",
-                 "num_workers", "lock", "batch_lock")
+    __slots__ = ("queue", "status_shm", "processes", "sync", "cfg")
 
     def __init__(self,
                  queue: SharedTaskQueue,
                  status_shm: SharedMemory,
                  processes: list,
-                 log_queue: Queue,
-                 num_workers: int):
+                 sync: SyncGroup,
+                 cfg: MpopConfig):
         self.queue = queue
         self.status_shm = status_shm
         self.processes = processes
-        self.log_queue = log_queue
-        self.num_workers = num_workers
-        self.lock = queue.lock
-        self.batch_lock = queue.batch_commit_lock
-    
+        self.sync = sync
+        self.cfg = cfg
+
+    @property
+    def num_workers(self) -> int:
+        return self.cfg.num_workers
+
     def __iter__(self):
-        return iter((self.queue, self.status_shm, self.processes,
-                     self.log_queue, self.lock, self.batch_lock))
+        return iter((self.queue, self.status_shm, self.processes, self.sync))
+
+    def create_supervisor(self):
+        from .supervisor import SupervisorController
+        return SupervisorController(
+            shared_queue=self.queue,
+            status_shm=self.status_shm,
+            processes=self.processes,
+            sync=self.sync,
+            num_workers=self.cfg.num_workers,
+            config=self.cfg.supervisor,
+        )
+
+def _create_status_shm() -> SharedMemory:
+    shm = SharedMemory(create=True, size=STATUS_ARRAY_SIZE)
+
+    arr = STATUS_ARRAY_TYPE.from_buffer(shm.buf)
+    for i in range(64):
+        arr[i].state = STATE_INIT
+        arr[i].local_queue_count = 0
+        arr[i].completed_tasks = 0
+
+    return shm
 
 
-#============================================================
-# ALLOCATE
-#============================================================
-def allocate(num_workers: int,
-             queue_slots: int = 96,
-             slot_class: Type[ctypes.Structure] = TaskSlot128,
-             queue_name: str = "shared_queue",
-             debug_task_delay: float = 0.0,
-             admin_frequency: int = 5,
-             handler_module: str = None,
-             worker_batch_size: int = 64) -> AllocationResult:
-    
-    err = validate_num_workers(num_workers)
-    if err:
-        raise ValueError(format_error(ErrorCode.E003_NUM_WORKERS_EXCEEDED, Component.ALLOCATION, err))
-    
-    err = validate_num_slots(queue_slots)
-    if err:
-        raise ValueError(format_error(ErrorCode.E002_INVALID_NUM_SLOTS, Component.ALLOCATION, err))
-    
-    supervisor_pid = os.getpid()
-    lock = Lock()
-    batch_lock = Lock()
-    log_queue = Queue()
-    
-    queue = SharedTaskQueue(
-        queue_id=1,
-        _num_slots=queue_slots,
-        num_workers=num_workers,
-        slot_class=slot_class,
-        queue_name=queue_name,
-        lock=lock,
-        batch_lock=batch_lock,
-        log_queue=log_queue
-    )
-    
+def _init_consumer_ids(queue: SharedTaskQueue, num_workers: int):
     all_available = (1 << 64) - 1
     used_mask = (1 << num_workers) - 1
     queue._state.available_consumer_ids = all_available & ~used_mask
     queue._state.active_worker_count = num_workers
-    
-    status_size = WORKER_STATUS_SIZE * 64
-    status_shm = SharedMemory(create=True, size=status_size)
-    
-    StatusArray = WorkerStatusStruct * 64
-    status_array = StatusArray.from_buffer(status_shm.buf)
-    for i in range(64):
-        status_array[i].state = STATE_INIT
-        status_array[i].local_queue_count = 0
-        status_array[i].completed_tasks = 0
-    
+
+
+def _create_worker_processes(cfg: MpopConfig,
+                             shared_refs: SharedRefs,
+                             sync: SyncGroup) -> list:
     processes = []
-    slot_class_name = slot_class.__name__
-    
-    for i in range(num_workers):
+    for i in range(cfg.num_workers):
         ctx = WorkerContext(
             worker_id=i,
             consumer_id=i,
-            shm_slots_name=queue.shm_slots_name,
-            shm_state_name=queue.shm_state_name,
-            shm_status_name=status_shm.name,
-            slot_class_name=slot_class_name,
-            _num_slots=queue_slots,
-            slot_size=queue.slot_size,
-            lock=lock,
-            batch_lock=batch_lock,
-            log_queue=log_queue,
-            supervisor_pid=supervisor_pid,
-            debug_task_delay=debug_task_delay,
-            admin_frequency=admin_frequency,
-            handler_module=handler_module,
-            worker_batch_size=worker_batch_size
+            shared_refs=shared_refs,
+            cfg=cfg,
+            sync=sync,
         )
-        p = Process(target=worker_process_entry, args=(ctx,))
-        processes.append(p)
-    
+        processes.append(Process(target=worker_process_entry, args=(ctx,)))
+    return processes
+
+
+# ============================================================
+# ALLOCATE
+# ============================================================
+def allocate(cfg: MpopConfig) -> AllocationResult:
+    cfg.check()
+
+    # Stamp supervisor pid before spawning workers
+    cfg.worker.supervisor_pid = os.getpid()
+
+    sync = cfg.create_sync()
+
+    queue = cfg.create_queue(sync)
+    _init_consumer_ids(queue, cfg.num_workers)
+    status_shm = _create_status_shm()
+    shared_refs = SharedRefs(
+        slots_name=queue.shm_slots_name,
+        state_name=queue.shm_state_name,
+        status_name=status_shm.name,
+    )
+    processes =_create_worker_processes(cfg, shared_refs, sync)
+
     return AllocationResult(
-        queue=queue,
-        status_shm=status_shm,
-        processes=processes,
-        log_queue=log_queue,
-        num_workers=num_workers
+        queue=queue, status_shm=status_shm, processes=processes, sync=sync,
+        cfg=cfg,
     )
 
-
-#============================================================
-# CLEANUP
-#============================================================
 def cleanup(queue: SharedTaskQueue, status_shm: SharedMemory):
     queue.cleanup()
     try:
