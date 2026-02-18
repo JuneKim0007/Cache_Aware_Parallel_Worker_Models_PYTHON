@@ -1,27 +1,22 @@
-# ============================================================
-# API/__INIT__.PY
-# ============================================================
-
+#USER FACING API
 from .mpop import (
-    MpopApi,
-    Mpop,
-    ValidationError,
-)
+    MpopApi, Mpop, ValidationError,)
+
 
 from .slot import (
-    TaskSlot128,
-    TaskSlot196,
-    TaskSlot128_cargs,
-    TaskSlot196_cargs,
+    TaskSlot128, TaskSlot196,
+    TaskSlot128_cargs,TaskSlot196_cargs,
     ProcTaskFnID,
     SlotVariant,
 )
 
+from .config import(
+    SlotConfig, SyncGroup, SharedRefs,
+    WorkerConfig, SupervisorConfig, MpopConfig,
+)
+
 from .errors import (
-    ErrorCode,
-    Component,
-    RegistryError,
-    ArgValidationError,
+    ErrorCode, Component, RegistryError, ArgValidationError,
     FunctionNotFoundError,
 )
 
@@ -47,6 +42,8 @@ from .worker import (
     STATE_IDLE,
     STATE_TERMINATED,
     STATE_NAMES,
+    STATUS_ARRAY_TYPE,
+    STATUS_ARRAY_SIZE,
 )
 
 from .tasks import (
@@ -57,31 +54,32 @@ from .tasks import (
 
 from .args import (
     ArgParser,
-    unpack_args,
+    unpack_args, pack_c_args,
 )
 
 from .registry import (
-    FunctionRegistry,
-    ArgsPool,
+    FunctionRegistry,ArgsPool,
     FunctionEntry,
 )
 
 __all__ = [
-    # Primary
     'MpopApi', 'Mpop', 'ValidationError',
-    # Slots
+    #ConfigS
+    'SlotConfig', 'SyncGroup', 'SharedRefs', 'WorkerConfig', 'SupervisorConfig', 'MpopConfig',
+    #Slots
     'TaskSlot128', 'TaskSlot196', 'TaskSlot128_cargs', 'TaskSlot196_cargs',
     'ProcTaskFnID', 'SlotVariant',
-    # Errors (single source)
+    #Errors
     'ErrorCode', 'Component',
     'RegistryError', 'ArgValidationError', 'FunctionNotFoundError',
-    # Registry
+    #Registry
     'FunctionRegistry', 'ArgsPool', 'FunctionEntry',
-    # Internal
+    #Internal
     'SharedTaskQueue', 'LocalTaskQueue',
     'allocate', 'cleanup', 'AllocationResult',
     'SupervisorController',
     'WorkerStatusStruct', 'STATE_INIT', 'STATE_RUNNING', 'STATE_IDLE', 'STATE_TERMINATED', 'STATE_NAMES',
+    'STATUS_ARRAY_TYPE', 'STATUS_ARRAY_SIZE',
     'TaskDispatcher', 'TaskResult', 'TaskContext',
-    'ArgParser', 'unpack_args',
+    'ArgParser', 'unpack_args', 'pack_c_args',
 ]
