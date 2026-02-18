@@ -4,137 +4,103 @@
 import ctypes
 from typing import Type, Optional, Dict, Any, Callable, Union, List
 
-from .slot import (TaskSlot128, TaskSlot128_cargs, ProcTaskFnID, has_char_args)
+from .slot import ProcTaskFnID
+from .config import MpopConfig
 from .queues import SharedTaskQueue
 from .allocation import allocate, AllocationResult
 from .supervisor import SupervisorController
 from .registry import FunctionRegistry
+from .args import pack_c_args
 from .errors import ArgValidationError, RegistryError
 
 
-#============================================================
-# VALIDATION ERROR (re-export for compatibility)
-#============================================================
 class ValidationError(ArgValidationError):
     __slots__ = ()
 
 
-#============================================================
-# MPOP API
-#============================================================
 class MpopApi:
-    
-    DEFAULT_SLOT = TaskSlot128_cargs
-    
+    """User-facing API.
+
+    Public interface is unchanged.  Internally, a single MpopConfig
+    absorbs all constructor params.  allocate(cfg) and
+    result.create_supervisor() use cfg directly — no param unpacking.
+    """
+
     def __init__(self,
                  workers: int = 4,
                  queue_slots: int = 4096,
                  slot_class: Type[ctypes.Structure] = None,
-                 
+
                  display: bool = True,
                  auto_terminate: bool = True,
-                 
+
                  debug: bool = False,
                  debug_delay: float = 0.0,
-                 
+
                  delimiter: str = ' ',
                  handler_module: str = None,
                  worker_batch_size: int = 16,
-                 
+
                  poll_interval: float = 0.05,
                  idle_check_interval: int = 10,
                  queue_name: str = "mpop",
                  validate: bool = True,
                  ):
-        self._workers = workers
-        self._queue_slots = queue_slots
-        self._slot_class = slot_class or self.DEFAULT_SLOT
-        self._display = display
-        self._auto_terminate = auto_terminate
-        self._debug = debug
-        self._debug_delay = debug_delay if not debug else (debug_delay or 0.1)
-        self._poll_interval = poll_interval
-        self._idle_check_interval = idle_check_interval
-        self._queue_name = queue_name
-        self._validate = validate
-        self._handler_module = handler_module
-        self._worker_batch_size = worker_batch_size
-        
-        # Get slot capacities
-        slot_instance = self._slot_class()
-        self._slot_int_args = len(slot_instance.args)
-        self._slot_c_args = len(slot_instance.c_args) if has_char_args(self._slot_class) else 0
-        
-        # Function registry with args pool
-        self._registry = FunctionRegistry(
-            slot_int_args=self._slot_int_args,
-            slot_c_args=self._slot_c_args,
+        # ---- Single config from user params ----
+        self._cfg = MpopConfig(
+            workers=workers,
+            queue_slots=queue_slots,
+            slot_class=slot_class,
+            display=display,
+            auto_terminate=auto_terminate,
+            debug=debug,
+            debug_delay=debug_delay,
             delimiter=delimiter,
+            handler_module=handler_module,
+            worker_batch_size=worker_batch_size,
+            poll_interval=poll_interval,
+            idle_check_interval=idle_check_interval,
+            queue_name=queue_name,
+            validate=validate,
         )
-        
+
+        # Registry — created from cfg
+        self._registry = self._cfg.create_registry()
+
         self._result: Optional[AllocationResult] = None
         self._supervisor: Optional[SupervisorController] = None
-        
+
         self._allocate()
-    
+
     def _allocate(self):
-        '''Allocate resources.'''
-        self._result = allocate(
-            num_workers=self._workers,
-            queue_slots=self._queue_slots,
-            slot_class=self._slot_class,
-            queue_name=self._queue_name,
-            debug_task_delay=self._debug_delay,
-            admin_frequency=self._idle_check_interval,
-            handler_module=self._handler_module,
-            worker_batch_size = self._worker_batch_size
-        )
-        
-        self._supervisor = SupervisorController(
-            shared_queue=self._result.queue,
-            status_shm=self._result.status_shm,
-            processes=self._result.processes,
-            log_queue=self._result.log_queue,
-            num_workers=self._result.num_workers,
-            display=self._display,
-            auto_terminate=self._auto_terminate,
-            poll_interval=self._poll_interval,
-            idle_check_interval=self._idle_check_interval,
-        )
-    
-    #==========================================================
-    # PROPERTIES
-    #==========================================================
+        """Allocate shared resources and build supervisor."""
+        self._result = allocate(self._cfg)
+        self._supervisor = self._result.create_supervisor()
+
     @property
     def queue(self) -> SharedTaskQueue:
         return self._result.queue
-    
+
     @property
     def slot_class(self) -> Type:
-        return self._slot_class
-    
+        return self._cfg.slot.cls
+
     @property
     def num_workers(self) -> int:
-        return self._workers
-    
+        return self._cfg.num_workers
+
     @property
     def registry(self) -> FunctionRegistry:
-        '''Access to function registry.'''
         return self._registry
-    
+
     @property
     def delimiter(self) -> str:
-        '''c_args parsing delimiter.'''
         return self._registry.delimiter
-    
+
     @delimiter.setter
     def delimiter(self, value: str):
-        '''Set c_args parsing delimiter.'''
         self._registry.delimiter = value
-    
-    #==========================================================
-    # FUNCTION REGISTRATION
-    #==========================================================
+
     def register(self,
                  handler: Callable,
                  name: str = None,
@@ -148,45 +114,35 @@ class MpopApi:
             arg_count=arg_count,
             meta=meta,
         )
-    
+
     def function(self, name: str = None, arg_count: int = 0):
         def decorator(handler):
             fn_id = self.register(handler, name=name or handler.__name__, arg_count=arg_count)
             handler.fn_id = fn_id
             return handler
         return decorator
-    
-    #==========================================================
-    # VARIABLES
-    #==========================================================
+
     def set_var(self, name: str, value: Any):
         self._registry.set_var(name, value)
-    
+
     def get_var(self, name: str) -> Any:
-        '''Get a named variable.'''
         return self._registry.get_var(name)
-    
-    #==========================================================
-    # SHARED MEMORY
-    #==========================================================
+
     def share(self, name: str, value: Any):
         self._registry.set_shared(name, value)
-    
+
     def get_shared(self, name: str) -> Any:
-        '''Get a shared value.'''
         return self._registry.get_shared(name)
-    
+
     def has_shared(self, name: str) -> bool:
-        '''Check if shared variable exists.'''
         return self._registry.has_shared(name)
-    
+
     def list_shared(self) -> List[str]:
-        '''List all shared variable names.'''
         return self._registry.list_shared()
-    
-    #==========================================================
+
+    # ==========================================================
     # ENQUEUE
-    #==========================================================
+    # ==========================================================
     def enqueue(self,
                 fn_id: int = None,
                 args: tuple = (),
@@ -196,9 +152,11 @@ class MpopApi:
                 timeout: float = 10.0) -> bool:
         if fn_id is None:
             fn_id = ProcTaskFnID.INCREMENT
-        
+
+        cfg = self._cfg
+
         # Prepare args (validates and handles pool/var refs)
-        if self._validate:
+        if cfg.validate:
             try:
                 args, packed_c_args, pool_id = self._registry.prepare_args(
                     fn_id, args, c_args
@@ -206,47 +164,21 @@ class MpopApi:
             except ArgValidationError as e:
                 raise ValidationError(str(e))
         else:
-            # No validation, just pack
-            packed_c_args = b''
+            packed_c_args = pack_c_args(c_args, self._registry.delimiter) if c_args is not None else b''
             pool_id = 0
-            if c_args is not None:
-                if isinstance(c_args, str):
-                    packed_c_args = c_args.encode('utf-8') + b'\x00'
-                elif isinstance(c_args, list):
-                    packed_c_args = self._registry.delimiter.encode('utf-8').join(
-                        s.encode('utf-8') for s in c_args
-                    ) + b'\x00'
-                else:
-                    packed_c_args = c_args
-        
-        # Create slot
-        task = self._slot_class()
-        task.tsk_id = tsk_id
-        task.fn_id = fn_id
-        
-        # Set int args
-        for i, v in enumerate(args):
-            if i < len(task.args):
-                task.args[i] = v
-        
-        # Set pool_id in meta if used
-        if pool_id > 0:
-            task.meta[0] = pool_id & 0xFF
-            task.meta[1] = (pool_id >> 8) & 0xFF
-            task.meta[2] = (pool_id >> 16) & 0xFF
-            task.meta[3] = (pool_id >> 24) & 0xFF
-        
-        # Set c_args
-        if packed_c_args and has_char_args(self._slot_class):
-            task.c_args = packed_c_args[:len(task.c_args)]
-        
+
+        # Build slot
+        task = cfg.slot.build_slot(
+            tsk_id=tsk_id, fn_id=fn_id, args=args,
+            c_args=packed_c_args, pool_id=pool_id,
+        )
+
         # Enqueue
         if blocking:
             return self._result.queue.enqueue_blocking(task, timeout)
         return self._result.queue.enqueue(task)
-    
+
     def enqueue_many(self, tasks: List[Dict], blocking: bool = False) -> int:
-        '''Enqueue multiple tasks. Returns count.'''
         count = 0
         for t in tasks:
             if self.enqueue(
@@ -258,23 +190,22 @@ class MpopApi:
             ):
                 count += 1
         return count
-    
+
     def run(self, enqueue_callback: Callable = None) -> int:
         return self._supervisor.run(enqueue_callback=enqueue_callback)
-    
+
     def status(self) -> Dict:
-        '''Get current status.'''
+        cfg = self._cfg
         return {
             'queue_occupancy': self.queue.get_actual_occupancy(),
-            'queue_capacity': self._queue_slots,
-            'workers': self._workers,
-            'display': self._display,
+            'queue_capacity': cfg.queue_slots,
+            'workers': cfg.num_workers,
+            'display': cfg.supervisor.display,
             'registered_functions': len(self._registry),
             'shared_variables': len(self._registry.list_shared()),
         }
-    
+
     def print_status(self):
-        '''Print status.'''
         s = self.status()
         print("=" * 50)
         print("MpopApi Status")
@@ -285,19 +216,16 @@ class MpopApi:
         print(f"Registered functions: {s['registered_functions']}")
         print(f"Shared variables: {s['shared_variables']}")
         print("=" * 50)
-    
+
     def list_functions(self) -> List[Dict]:
-        '''List registered functions.'''
         return self._registry.list_functions()
-    
+
     @classmethod
     def simple(cls, workers: int = 2, display: bool = False) -> 'MpopApi':
-        '''Create minimal instance.'''
         return cls(workers=workers, queue_slots=256, display=display)
-    
+
     @classmethod
     def debug(cls, workers: int = 2, delay: float = 0.1) -> 'MpopApi':
-        '''Create debug instance.'''
         return cls(workers=workers, debug=True, debug_delay=delay)
 
 
