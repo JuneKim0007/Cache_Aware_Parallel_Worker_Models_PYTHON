@@ -1,9 +1,3 @@
-# ============================================================
-# API/ARGS.PY
-# ============================================================
-# Argument parsing for CHAR_ARGS slots.
-# ============================================================
-
 from typing import List
 
 
@@ -32,3 +26,17 @@ class ArgParser:
 
 def unpack_args(c_args: bytes, encoding: str = 'utf-8') -> List[str]:
     return ArgParser().parse_as_str(c_args, encoding)
+
+
+def pack_c_args(c_args, delimiter: str = ' ') -> bytes:
+    """Pack c_args input to null-terminated bytes.
+
+    Handles str, List[str], and raw bytes. No pool or var: logic —
+    that belongs in FunctionRegistry._process_c_args().
+    """
+    if isinstance(c_args, str):
+        return c_args.encode('utf-8') + b'\x00'
+    elif isinstance(c_args, list):
+        delim = delimiter.encode('utf-8')
+        return delim.join(s.encode('utf-8') for s in c_args) + b'\x00'
+    return c_args  # already bytes
