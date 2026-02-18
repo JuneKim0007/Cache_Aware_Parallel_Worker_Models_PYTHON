@@ -6,14 +6,9 @@ import ctypes
 from enum import IntEnum
 from typing import Type
 
-
-#============================================================
-# TASK FUNCTION ID
-# Internal Range is defined as: 0x0000 - 0x0FFF
-# User range is any values above 0x1000
-#============================================================
 class ProcTaskFnID(IntEnum):
     TERMINATE     = 0x0000
+    BENCHMARK     = 0x0001
     READ_FILE     = 0x0100
     READ_DIR      = 0x0110
     HASH          = 0x0200
@@ -74,9 +69,6 @@ class TaskSlot196_cargs(ctypes.Structure):
     ]
 
 
-#============================================================
-# SLOT REGISTRY
-#============================================================
 SLOT_REGISTRY: dict[Type[ctypes.Structure], SlotVariant] = {
     TaskSlot128:       SlotVariant.INT_ARGS,
     TaskSlot196:       SlotVariant.INT_ARGS,
@@ -92,9 +84,6 @@ SLOT_CLASS_MAP = {
 }
 
 
-#============================================================
-# HELPERS
-#============================================================
 def get_slot_variant(slot_class: Type[ctypes.Structure]) -> SlotVariant:
     if slot_class not in SLOT_REGISTRY:
         raise KeyError(f"slot_class {slot_class.__name__} not in SLOT_REGISTRY")
