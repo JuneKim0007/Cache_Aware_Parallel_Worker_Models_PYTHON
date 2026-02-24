@@ -1,319 +1,319 @@
-# Multiprocessing of Python (MPOP)- Documentation
+# Mpop — Cache Aware Parallel Worker Models (Python)
 
-## Overview
+**Experimental Version**
 
-The Mpop API provides a single-producer multiple-consumer task-queue model mainly desigend for high-throughput, CPU-bound workloads in Python.
+Language: Python\
+Requires: Python >= 3.10 (tested on 3.12 and 3.14)\
+Dependencies: psutil
 
-It focuses on making multiprocessing faster, simpler, and more predictable, while still supporting dynamic task enqueuing and basic orchestration tools.
+Mpop is a single-producer, multiple-consumer task queue for parallel processing in Python.
 
-Mpop offers a clean, familiar user facing API that handles the hard parts internally to support better development. 
+The main goal is simple: keep workers busy and use memory efficiently.
 
-### Why Mpop?
+It does this by packing task data into fixed-size 128-byte slots that sit in shared memory, where workers batch-claim ranges using a bitmap coordination layer to reduce lock contention.
 
-Mpop is mainly built to assist developers to have better experiences in Python multiprocessing while providing competetive performance.\
-The specific benefits Mpop provides are:
- - Higher throughput than Python’s standard multiprocessing module even with additional coordination layer!
- - Simpler process management through a unified shared queue
- - Easier customization of flow-control features.
- - Supervisor process support for logging, monitoring, and administration for each processes.
+The framework uses a typed handler system where all function parameters must have type annotations.\
+Types are inspected once at registration time and pre-compiled into pack/unpack functions, so the hot path during task execution has zero per-argument branching.
 
-### Core Design Principles and How It Works
+This version is an experimental rewrite. The previous version supported legacy untyped handlers and multiple slot sizes; all of that has been removed.\
+Everything is now typed-only dispatch with a single universal 128-byte slot.
 
-Mpop's design principle involves two things:
- - No unncessary complication
- - Keep static allocation heavy, make runtime light.
-
-That is Mpop is designed to support developability while moving as much work as possible to initialization time to reduce runtime overhead.
-
-How did Mpop acheive that?
-
- - A custom shared queue designed to maximize process utilization time
- - Reduced reliance on Python’s dynamic features where performance matters
- - A user-facing API that stays simple, while complexity is handled internally
-
-The result is a multiprocessing system that is both fast and intuitive to use! 
-To see this please refer to Benchmark section
-
---- 
-
-## Introduction
-
-The process model is simply (Supervisor, a set of Workers) pair.
-
-
-[image_place_holder]
-
-
-
-Supervisor is mainly responsible for mainly:
- - spawning/despawning Workers.
- - Creating/clearing shared memeory view on data among Workers.
- - Logging and Administrating Workers.
- - Receiving work requests both dynamically and statically.
-
-Workers, on the other hands, as their name suggests are the executions for running the actual code. 
-
-Once Mpop() is called, the process that calls Mpop turns into Supervisor, creating essential features as well as spawning Workers.
-
-One of the important feature that gets allocated during the initial period is Shared Queue.
-
---- 
-## Shared Queue and Local Queue
-
-### Shared Queue:
-
-Shared Queue is simply an array shared among Supervisor and Workers that stores data about how Workers should run the code. \
-_So Shared Queue is nothing really fancy!_
-
-Shared Queue by default has 65536 elements called Slot\
-Each Slot stores data on each Task containing how Workers should run the code.
-
-The Shared Queue is circular, providing dynamic advantages in handling/dequeuing job requests with relatively simple logic.
-
-During the allocation, you can simply write:
-
-`
-    app = MpopApi(
-       queue_slots: int = 4096*2
-    )
-`
-to changed the size of Shared Queue.
-
-However, one important thing about Shared Queue is that **The size of Shared Queue MUST BE POWER OF 2**\
-Otherwise, the supervisor will refuse to allocate the shared queue.\
-__Note__: the ristrictions rooted from how Shared Queue moves its tail and head for efficiency _
-
-### Local Queue:
-
-Another Queue that are created during the initial period is Local Queue(s).\
-Local Queue is really nothing different from Shared Queue except it's only accessible to each assigend Worker and have much smaller size.\
-
-During the Runtime, each worker fetch a bunch of data at once from Shared Queue and store into their Local Queue.\
-So Local Queue essentially holds the same information that was once existed in Shared Queue.
-
-Keen Reader may see that that would be unncessary and hurt performance. 
-While that could be true, that in idle situation, Workers would execute tasks faster if they directly read data from Shared Queue and execute task,\
-There are a few real-world limitations to that model:
-
- - Worker has to hold the Lock each time they access Shared Queue.
- - Frequent access to Shared Queue can slow down performance, especially on multi-core systems.
- - As the number of workers grows, the overhead of coordinating access to Shared Queue costs more.
-
-and a few others!
-
-### Scheduling Method
-
-Many of the concurrency problems of shared Data structure that attempts to ensure consistency of Shared Queue arise from Lock Contention.\
-
-To mitigate this problem, instead of using a naive Shared Queue Model, Mpop does the following:
-
-- **Batch-Dequeuing:** instead of dequeuing each time, Workers put tasks into a batch and dequeue at once.
-- **Range-Claiming:** Workers do not even dequeue in the critical section, but rather they only mark the range telling other workers the part of Shared Queue is reserved.
-
-In this way, Workers barely hold the lock and the cost from Lock contention becomes much insiginificant (~3~1% in total Worker CPU time)!
-
-There are few other methods implemented in Mpop to maintain high performance while handling dynamic work requests, mainly:
- - **Copying-At-Once:** Workers do copy each element in Shared Array; instead Workers copy the range of data at once using `ctypes.memmove`
- - **Cache-Awareness:** Each Data is designed to be aligend with 64 bytes matching typical cache line boundaries in modern CPU.s
- - **Compacted Data:** Each Queue element is designed to be very small, typically around 256 bytes, while still efficiently storing the necessary data.
-
-However for curious readers, you may refer to this [link]() documenting in details how Mpop's Scheduling method works under the hood.
-
---- 
-
-### Slots:
-
-Slots are elements of both Shared Queue and Local Queue. You can think of it like a C array, for example:
-`
-Slot arr[50];
-`
-which creates 50 Slot elements within an array.
-
-Slots use the same class structure in both Shared queue and Local queue, ensuring consistency while remaining compact.
-
-Each slot primarily stores four categories of variables:
- - tsk_id – Identifier variable used for debugging purposes \
- - fn_id – identifies which function to execute\
- - args – the argument values for the function\
- - meta – additional metadata to handle information not related to function logic (e.g., timestamps, logs)\
-
-There are four different slot classes: TaskSlot128, TaskSlot196, TaskSlot256, TaskSlot512. 
-The numbering behinds each name indicates the size of the slot;\
-and generally bigger size means to more or lengthier argument.
-_What if I have a really long lengthy argument that won't be fit into the slot?\ 
-In that case Mpop  automatically creates a mapping between the argument and arg value that would be passed into the slot, handling lengthy data flexibly_
-
-Why Mpop uses strict fixed size? Well, the reasonings are concerned on two main factors:
- - 64 bytes are generally aligned with CPU cache lines.
- - Python's dynamism would cost much memory space without explicitly fixing data size.
-
-
-If we create Shared queue of TaskSlot256 in 65536 size,\
-there would be total around 256*65536 ≈ 268MB memory allocation. 
-
-So choosing the size of slot and number of Slots for the Shared Queue sometimes require careful thinking;\
-Though in most of cases default size and slot classes would be more than small enough to fit into modern CPUSs.
-
-During the allocation period, Mpop automatically ensures both Shared Queue's and Local Queue's slot classes are identical and unchangable.\
-
-By default Mpop uses Taskslot196 to store information. However, you can always change it by telling Mpop to create a queue of different slot types.
-For instance:
-
-```
-    app = MpopApi(
-       queue_slots: int = 4096*2,
-       slot_class: Type[ctypes.Structure] = TaskSlot128
-    )
-```
-
-### Slot data (tsk_id, fn_id, c_args, meta)
-
-The structure of the default slot is:
-```class TaskSlot196_cargs(ctypes.Structure):
-    196-byte task slot with char+int arguments.
-    _align_ = 196
-    _fields_ = [
-        ("tsk_id", ctypes.c_uint32),
-        ("fn_id", ctypes.c_uint32),
-        ("args", ctypes.c_int64 * 5),
-        ("c_args", ctypes.c_char * 92),  
-        ("meta", ctypes.c_uint8 * 56),
-    ]
-```
-Right now you may want to directly refer to slot.py to see the structure
-However, later I will document different slot types and structure.
-
-## Worker
-
-A worker is a single process spawned by the supervisor (or an entrypoint process).\
-Each worker is bound to a shared task queue and maintains its own local queue, which stores tasks fetched from the shared queue.
-
-Workers fetch tasks from the shared queue and store the duplicate information into its local queue by design.\
-The rationales behind this design are simple:
- - To support dynamic request handling and administrative operations
- - To allow the supervisor to efficiently block incoming requests when the shared queue is full
-
-This additional abstraction layer not only simplifies the supervisor’s blocking efficiency but also improve blocking logic:\
-Rather than continuously polling individual workers to allocate tasks, the supervisor only needs to enqueue tasks 
-into the shared queue when space becomes available in the shared queue.
-
-The worker implicitly receives three pieces of information to process tasks: Function ID, Arguments, and Meta Data.\
-I will unpack them shortly but keep in mind that those three informations are: 
- - Function ID – a mapping value that tells the worker which function to execute.
- - Arguments – the values to pass to the function when it runs.
- - Meta Data – intended to carry timestamps, logging information, etc. Though it is currently unimplemented. (Refer to Road Map)
 ---
 
+## Process Model
 
+The model is simply a (supervisor, set of workers) pair.\
+Supervisor is responsible for spawning, administrating, and logging worker processes. Workers execute tasks.\
+For efficiency the supervisor can run in minimal mode (display=False).
 
-### Creating handler and Enqueuing Task:
+Workers fetch tasks from a shared queue in batches and copy them into a local queue.\
+The rationale behind this is:
+ - To support dynamic request handling and administrative operations
+ - To let the supervisor efficiently block incoming requests when the shared queue is full
+ - Reduce lock contention since workers claim ranges atomically instead of dequeueing one by one
 
-The multi processing models are often complex to implement 
-To manage the complexity created due to managing multi process, this API uses advantage of handler functions that are somewhat indirect way to pass tasks to workers.
-For example:
+The supervisor introduces a potential single point of failure. If supervisor is terminated, workers detect this via periodic health checks and also terminate.
+
+---
+
+## Slot Layout
+
+Single universal slot. No variants.
 
 ```
-def some_function_handler(slot: TaskSlot196):
-    arg1 = slot.args[0]
-    arg2 = slot.args[1] if len(slot.args) > 1 else 1
-    <Function LOGIC>
+┌──────────┬──────────┬──────────────────┬──────────────┐
+│ tsk_id 8B│ fn_id 8B │   args 80B       │   meta 32B   │ = 128B
+│ uint64   │ uint64   │  10 × int64      │              │
+└──────────┴──────────┴──────────────────┴──────────────┘
+```
+
+Each argument occupies exactly 8 bytes regardless of type.\
+`int`, `float`, `bool` are packed directly into the int64 slot using struct.\
+`str`, `list`, `dict`, `tuple`, `set`, `bytes` and other types that dont fit in 8 bytes go through an ArgsPool (multiprocessing.Manager dict) and the slot stores the pool_id reference.
+
+This means you get up to 10 arguments per handler function.
+
+### Type System
+
+DIRECT types (stored in slot, zero overhead):
+ - `int` → int64
+ - `float` → float64  
+ - `bool` → bool (as int64)
+ - Extended: `int8`, `uint8`, `int16`, `uint16`, `int32`, `uint32`, `float32`
+
+REFERENCE types (stored in ArgsPool, retrieved by workers):
+ - `str`, `list`, `dict`, `tuple`, `set`, `bytes`, any custom class
+
+The ArgsPool uses lazy initialization. If your handlers only use DIRECT types, no Manager process is ever spawned and there's zero overhead from it.
+
+---
+
+## Basic Usage
+
+```python
+from api import MpopApi, TaskResult
+
+
+def multiply(a: int, b: int) -> int:
+    return a * b
+
+def power(base: int, exp: int) -> int:
+    return base ** exp
+
+HANDLERS = {
+    0x8000: multiply,
+    0x8001: power,
+}
+
+if __name__ == "__main__":
+    app = MpopApi(
+        workers=4,
+        display=True,
+        handler_module=__name__,
+        debug_delay=0.05,
+    )
+
+    app.register_handlers(handlers_dict=HANDLERS)
+    app.validate()
+
+    for i in range(100):
+        app.enqueue(multiply, a=i, b=10, tsk_id=i)
+
+    for i in range(2, 6):
+        app.enqueue(fn_id=0x8001, args=(i, 3), tsk_id=i + 100)
+
+    app.run()
+```
+
+### Decorator Style
+
+```python
+if __name__ == "__main__":
+    app = MpopApi(workers=4, display=True)
+
+    @app.task(fn_id=0x8000)
+    def multiply(a: int, b: int) -> int:
+        return a * b
+
+    app.enqueue(multiply, a=5, b=10)
+    app.run()
+```
+
+### Enqueue Styles
+
+Two ways to enqueue:
+
+```python
+# Pythonic — pass function reference + keyword args
+app.enqueue(multiply, a=10, b=3.14)
+
+# Positional — pass fn_id + args tuple
+app.enqueue(fn_id=0x8000, args=(10, 3.14))
+```
+
+Both are zero-validation at enqueue time. Type checking already happend at registration.
+
+---
+
+## Configuration
+
+```python
+app = MpopApi(
+    workers=4,              # number of worker processes
+    queue_slots=4096,       # shared queue size (MUST be power of 2)
+    display=True,           # TTY supervisor display
+    auto_terminate=True,    # auto send TERMINATE when idle
+    debug=False,            # debug mode
+    debug_delay=0.0,        # artificial delay per task (seconds)
+    handler_module=None,    # module name containing HANDLERS dict
+    worker_batch_size=16,   # max tasks per batch claim
+    poll_interval=0.05,     # supervisor poll rate
+    idle_check_interval=10, # polls before checking idle state
+    queue_name="mpop",      # shared memory name prefix
+)
+```
+
+`queue_slots` must be a power of 2. The supervisor will refuse to allocate otherwise.
+
+---
+
+## REFERENCE Type Example
+
+When your handler takes `str`, `list`, or other non-primitive types, the data flows through ArgsPool automatically:
+
+```python
+def process(name: str, items: list, scale: float) -> str:
+    return f"{name}: {sum(items) * scale}"
+
+HANDLERS = {0x9000: process}
+
+if __name__ == "__main__":
+    app = MpopApi(workers=2, handler_module=__name__)
+    app.register_handlers(handlers_dict=HANDLERS)
+
+    app.enqueue(process, name="batch", items=[10, 20, 30], scale=2.5)
+    app.run()
+```
+
+The `name` and `items` params are REFERENCE type — they get stored in ArgsPool in the main process and retrived by the worker process that picks up the task. `scale` is DIRECT (float64) so it sits in the slot directly.
+
+Workers automatically clean up pool entries after retrieval.
+
+---
+
+## Important Notes and Limitations
+
+**This is experimental.** Things work but there are rough edges. Read this section before using.
+
+### 1. Must run under `if __name__ == "__main__"`
+
+macOS uses the `spawn` start method for multiprocessing. This means the entire module gets re-imported in each child process.\
+If `MpopApi()` is at module level without the guard, child processes will re-create it and you get an infinite spawn loop.
+
+This is not mpop-specific, its a Python multiprocessing thing on macOS.\
+Linux uses `fork` so it generally works without the guard, but you should always use it anyway.
+
+### 2. Handlers must exist before enqueue and run
+
+All handlers need to be registered **before** you call `app.enqueue()` or `app.run()`.
+
+The decorator style (`@app.task()`) works but its somewhat fragile:
+ - The decorated function must be defined before any enqueue calls
+ - If you define handlers in a different module and import them, the decorator might not have ran yet depending on import order
+ - For anything serious, the HANDLERS dict + `register_handlers()` pattern is more reliable
+
+If you enqueue a task with an fn_id that workers dont know about, you'll see `[Error] tsk_id=N: Unknown fn_id 0xNNNN` in the log. The task is silently dropped.
+
+### 3. All handler parameters must have type annotations
+
+No exceptions. If even one parameter is missing a type hint, registration will fail with `TypeResolutionError`.
+
+This is intentional — the type system compiles pack/unpack at registration and needs to know every parameter's type.
+
+```python
+# Good
+def multiply(a: int, b: int) -> int:
+    return a * b
+
+# Bad — will fail at registration
+def multiply(a, b):
+    return a * b
+```
+
+### 4. Maximum 10 arguments per handler
+
+The slot has 10 int64 argument slots. If your function has more than 10 parameters it will error at registration.\
+If you need more arguments, pack related data into a dict or list (those go through ArgsPool as REFERENCE type).
+
+### 5. ArgsPool overhead for REFERENCE types
+
+REFERENCE types (`str`, `list`, `dict`, etc.) require inter-process communication through `multiprocessing.Manager`.\
+This is noticeably slower than DIRECT types which just get packed into the slot.
+
+For performance critical paths, try to stick to `int`, `float`, `bool` parameters when possible.
+
+The Manager is lazily initialized — it only starts when you first enqueue a task with REFERENCE type argument. If you never use REFERENCE types, no Manager process is created.
+
+### 6. Python 3.14 annotation changes
+
+Python 3.14 changed how annotations work (PEP 749). The type resolver has multiple fallback chains to handle this, but if you run into issues with type resolution on 3.14, try using explicit type hints instead of relying on `from __future__ import annotations`.
+
+### 7. Return values are not collected
+
+Handlers can return values and they get wrapped into `TaskResult` internally. But there is currently no mechanism to send results back to the main process. Return values exist mainly for error handling — if a handler raises, the worker logs it and continues.
+
+```python
+# Both work fine
+def add(a: int, b: int) -> int:
+    return a + b
+
+def add_v2(a: int, b: int):
+    result = a + b
     return TaskResult(success=True, value=result)
 ```
 
-Once you've created the handler function you can simply create a registry
-```
-HANDLERS = {
-    0xB000: some_function_handler
-}
-```
-Registry is simply a set of key, value pairs (fn_id, function()).
-Remember Workers take fn_id to figure out which functions to actually run.
-This design was intentional to reduce the size of the slot for memory efficiency:\
-while Queues can store fn_id which are only 4 Hexadecimal values (2 bytes), the actual function definition will be stored only once in the memory.
+### 8. handler_module vs handlers_map
 
-Once you've created a registry, you can simply let shared queue to enqueue tasks.\
-For instance:
-```
-app.enqueue(fn_id=0xB002, args=(i, 0), tsk_id=i)
-```
+There are two ways handlers reach worker processes:
 
-Now the shared queue allocate tasks and the task is available for the worker to use:
+`handlers_map` — Built from your registry at `run()` time, pickled into each Process object. This is how `@app.task()` and `register_handlers()` work.
 
-However, due to the slot being fixed size (multiples of 64 bytes), in general arguments are not going to fit; 
-in this case consider using bigger slots, or using argument pools that store reference to the lengthy argument.
+`handler_module` — Workers import the module by name and look for a `HANDLERS` dict. This is the `handler_module=__name__` parameter.
 
-** Due to the slot being fixed size (multiples of 64 bytes), in general not all arguments are not going to fit; 
-I’m currently designing an argument pool that stores mappings to lengthy variables.
-
-## Supervisor
-The supervisor process is responsible for managing and administering worker processes while handling incoming requests to enqueue tasks into the Shared Queue.\
-
-The design principles are:
-- Providing a user-facing process that exposes visibility into the internal state of the system
-- Providing user-facing interfaces for debugging and logging
-- Providing user-facing administrative controls, including spawning and terminating workers
-- Internally handling both static and dynamic request for enqueuing the task into the Shared Queue.
-
-However, the supervisor introduces a potential single point of failure. If the supervisor is abruptly terminated, workers perform periodic health checks; upon detecting that the supervisor is no longer alive, they also terminate.\
-I am currently designing a recovery mechanism to handle supervisor failure, but this has been quite challenging because recovery requires a reliable method to re-link a newly created supervisor with existing workers, which introduces coordination and state-reconciliation problems. Please refer to the Roadmap.
-
-
-### Basic Usage
+Both can coexist. If the same fn_id shows up in both, handlers_map takes priority.\
+For the most reliable setup, use both:
 ```python
-  def main():
-    app = MpopApi(
-      debug=True,
-      debug_delay=0.05,
-    )
-    app.print_status(config=True, queue=True, workers=True)
-
-    for i in range(100):
-      app.enqueue(
-      fn_id=ProcTaskFnID.INCREMENT,
-      args=(i * 10, 1),
-      tsk_id=i + 1,
-      )
-    app.run()
-    return
-
-  if name == "main":
-    exit(main())
+app = MpopApi(handler_module=__name__)
+app.register_handlers(handlers_dict=HANDLERS)
 ```
----
-## Bench Mark
 
-Benchmark Mechanism:
-
-- The benchmark compares mpop against Python’s standard multiprocessing module under two conditions: statically allocated jobs and dynamic job request incoming.\
-- A baseline implementation that was being compared was written using only Python standard libraries.\
-- Spawning worker time were excluded from both benchmarks. (because Mpop is to reduce dynamic time while static allocation is heavy)\That is the benchmark start time is recorded when all worker processes are signalled to run for both files.\
-- Mpop was run in max_performance mode, which disables optional layers such as logging to ensure a fair comparison.
-- Both ran on virtual machine hosted by Cloud service and on my local machine
-
-
-### Result
-
-
-**Uniform Workloads**
-
-- **900 tasks:** Standard multi-threading completed in ~0.00845s s, dynamic scheduling ~0.00890s s, Mpop: ~0.049 s. Slightly slower for very small tasks.\
-- **9,000 tasks:** Standard ~0.08842s s, dynamic ~0.07862s, Mpop ~0.08267s s. Performance matches dynamic scheduling. \
-- **90,000 tasks:** Standard ~.84855s s, dynamic ~0.80830s, Mpop ~0.81982s s. Nearly identical to dynamic scheduling.  
-- **1,800,000 tasks:** Standard ~4.51 s, dynamic ~4.24 s, Mpop ~4.26 s. Nearly identical to dynamic scheduling.  
-
-**Takeaways:**  
-- Traditional multi-threading is slightly faster for very small workloads.  
-- Our supervisor-managed system avoids workers blocking each other, keeping performance predictable.  
-- Scales well to tens of thousands of tasks while maintaining near-optimal efficiency.  
-
-      
-### Interpretation
-Mpop design is to maximum process to stay in a core that was spawned. 
-
-Overall, mpop demonstrates at least 97% of 
-### Interpretation and Concerns:
+This way, workers have two chances to discover each handler.
 
 ---
+
+## Shared Queue
+
+The shared queue is a circular buffer in shared memory. Default size is 4096 slots.
+
+Scheduling uses batching and range-claiming to reduce lock contention.\
+Workers atomically claim a range of slots from the shared queue, copy them to their local queue, then process everything without holding any locks.
+
+A bitmap (`active_batches`) tracks which workers currently hold claimed but uncommited ranges.\
+When the last worker finishes its batch, committed occupancy is updated so the producer can reclaim space.
+
+To change queue size:
+```python
+app = MpopApi(queue_slots=4096*2)  # must be power of 2
+```
+
+---
+
+## File Structure
+
+```
+api/
+├── __init__.py       — exports
+├── slot.py           — 128B TaskSlot definition
+├── types.py          — type classification, pack/unpack codegen
+├── errors.py         — error codes and exceptions
+├── registry.py       — ArgsPool + FunctionRegistry
+├── tasks.py          — TaskResult, TaskDispatcher
+├── queues.py         — SharedTaskQueue, LocalTaskQueue
+├── worker.py         — worker process entry point
+├── allocation.py     — static allocation
+├── supervisor.py     — supervisor controller + TTY display
+└── mpop.py           — MpopApi user-facing class
+```
+
+---
+
+## Road Map
+ - Result Collection: Returning task results back to the main process via shared memory or queue
+ - Argument Pool: Better cleanup strategy, capacity monitoring, maybe replacing Manager with SharedMemory-based pool
+ - Error Recovery: Worker failure detection, health check improvements, respawning
+ - Supervisor Recovery: Reconnecting a new supervisor with existing workers after failure. This has been challenging because recovery requires reliable method to re-link the supervisor with workers which introduces coordination and state-reconciliation problems.
+ - Meta Data: Building the 32B meta section to support timestamping, flexible logging levels
+ - Benchmarking: Comparative analysis against multiprocessing.Pool and concurrent.futures
 ## Road Map
 - Argument Pool: Implementing a pool for storing lengthy arguments and user-facing functions for integrating handler validation and creating a registry.
 - Meta Data: Building a meta section to support timestamping, flexible logging such as no log, detailed log, and better control.
