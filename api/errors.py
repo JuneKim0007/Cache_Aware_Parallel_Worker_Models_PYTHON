@@ -1,7 +1,6 @@
-#=============================================================
-# ERRORS.PY
-#=============================================================
-# Changelog: moved errors scattered across the file into this file.
+# ============================================================
+# API/ERRORS.PY — Consolidated error definitions
+# ============================================================
 
 from enum import IntEnum
 from typing import Optional
@@ -10,36 +9,38 @@ from typing import Optional
 class Component:
     __slots__ = ()
     SHARED_QUEUE = "SharedQueue"
-    LOCAL_QUEUE = "LocalQueue"
-    WORKER = "Worker"
-    ALLOCATION = "Allocation"
-    SUPERVISOR = "Supervisor"
-    REGISTRY = "Registry"
+    LOCAL_QUEUE  = "LocalQueue"
+    WORKER       = "Worker"
+    ALLOCATION   = "Allocation"
+    SUPERVISOR   = "Supervisor"
+    REGISTRY     = "Registry"
 
 
 class ErrorCode(IntEnum):
-    E001_QUEUE_FULL = 1
-    E002_INVALID_NUM_SLOTS = 2
+    E001_QUEUE_FULL          = 1
+    E002_INVALID_NUM_SLOTS   = 2
     E003_NUM_WORKERS_EXCEEDED = 3
-    E004_INVALID_BATCH_SIZE = 4
-    E005_QUEUE_EMPTY = 5
+    E004_INVALID_BATCH_SIZE  = 4
+    E005_QUEUE_EMPTY         = 5
     E011_INVALID_CONSUMER_ID = 11
-    E012_SHARED_QUEUE_NONE = 12
-    E021_SHM_ALLOC_FAILED = 21
+    E012_SHARED_QUEUE_NONE   = 12
+    E021_SHM_ALLOC_FAILED    = 21
     E022_PROCESS_SPAWN_FAILED = 22
-    E023_INVALID_SLOT_CLASS = 23
+    E023_INVALID_SLOT_CLASS  = 23
+    E030_TYPE_ERROR          = 30
+    E031_REGISTRATION_ERROR  = 31
 
 
 class RegistryError(Exception):
-    """Base registry error."""
     __slots__ = ()
 
 class ArgValidationError(RegistryError):
-    """Argument validation failed."""
     __slots__ = ()
 
 class FunctionNotFoundError(RegistryError):
-    """Function ID not registered."""
+    __slots__ = ()
+
+class TypeResolutionError(RegistryError):
     __slots__ = ()
 
 
