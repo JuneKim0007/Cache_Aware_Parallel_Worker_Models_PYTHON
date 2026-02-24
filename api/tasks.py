@@ -1,96 +1,72 @@
 # ============================================================
-# API/TASKS.PY
+# API/TASKS.PY — Task dispatch (typed handlers only)
 # ============================================================
-# Change log: REPLACED Dict_based fetching to Tuple based fetching
-#             Also, added __slot__() attribute to reduce memory pressure
-#             Removed my personal comments
 
 from typing import Callable, Dict, Any
+
 from .slot import ProcTaskFnID
-from .args import ArgParser
+from .types import HandlerMeta
 
 
 class TaskResult:
-    __slots__= ("success", "value", "error")
+    """Internal task execution result. Used to validate handler success."""
+    __slots__ = ("success", "value", "error")
 
     def __init__(self, success: bool, value: Any = None, error: str = None):
         self.success = success
         self.value = value
         self.error = error
 
-class TaskContext:
-    __slots__= ("worker_id", "arg_parser", "log_func", "extra")
 
-    def __init__(self,
-                 worker_id: int,
-                 arg_parser: ArgParser = None,
-                 log_func: Callable[[str], None] = None,
-                 extra: Dict[str, Any] = None):
-        self.worker_id = worker_id
-        self.arg_parser = arg_parser
-        self.log_func = log_func
-        self.extra = extra
-
-_RESULT_TERMINATE = TaskResult(success=True, value="TERMINATE")
+# Pre-allocated singleton
 _RESULT_OK = TaskResult(success=True)
 
 
-def handle_terminate(slot, ctx: TaskContext) -> TaskResult:
-    return _RESULT_TERMINATE
+# ============================================================
+# BUILTIN HANDLERS (typed — all params annotated)
+# ============================================================
+def _handle_increment(a: int, b: int) -> int:
+    return a + b
 
+def _handle_add(a: int, b: int) -> int:
+    return a + b
 
-def handle_increment(slot, ctx: TaskContext) -> TaskResult:
-    a = slot.args[0]
-    b = slot.args[1] if len(slot.args) > 1 else 1
-    result = a + b
-    if ctx.log_func:
-        ctx.log_func(f"INCREMENT: {a} + {b} = {result}")
-    return TaskResult(success=True, value=result)
-
-
-def handle_add(slot, ctx: TaskContext) -> TaskResult:
-    return TaskResult(success=True, value=slot.args[0] + slot.args[1])
-
-
-def handle_multiply(slot, ctx: TaskContext) -> TaskResult:
-    return TaskResult(success=True, value=slot.args[0] * slot.args[1])
-
-
-def handle_status_report(slot, ctx: TaskContext) -> TaskResult:
-    if ctx.log_func:
-        ctx.log_func(f"STATUS: worker_id={ctx.worker_id}")
-    return _RESULT_OK
-
-
-def handle_default(slot, ctx: TaskContext) -> TaskResult:
-    return _RESULT_OK
-
-
-_BUILTIN_HANDLERS: Dict[int, Callable] = {
-    ProcTaskFnID.TERMINATE: handle_terminate,
-    ProcTaskFnID.INCREMENT: handle_increment,
-    ProcTaskFnID.ADD: handle_add,
-    ProcTaskFnID.MULTIPLY: handle_multiply,
-    ProcTaskFnID.STATUS_REPORT: handle_status_report,
-}
+def _handle_multiply(a: int, b: int) -> int:
+    return a * b
 
 
 # ============================================================
-# TASK DISPATCHER
+# TASK DISPATCHER — typed handlers only
 # ============================================================
 class TaskDispatcher:
-    __slots__ = ("_handlers", "_default")
+    """Routes fn_id → HandlerMeta → unpack → handler call.
+    
+    All handlers are typed. No legacy (slot, ctx) path.
+    TERMINATE is handled inline by the worker loop, not here.
+    """
+    __slots__ = ("_handlers",)
 
     def __init__(self):
-        self._handlers: Dict[int, Callable] = dict(_BUILTIN_HANDLERS)
-        self._default = handle_default
+        self._handlers: Dict[int, HandlerMeta] = {}
 
-    def register(self, fn_id: int, handler: Callable):
-        self._handlers[fn_id] = handler
+    def register(self, meta: HandlerMeta):
+        """Register a typed handler."""
+        self._handlers[meta.fn_id] = meta
 
-    def dispatch(self, slot, ctx: TaskContext) -> TaskResult:
-        handler = self._handlers.get(slot.fn_id, self._default)
+    def dispatch(self, slot) -> TaskResult:
+        """Dispatch a task. Zero-branch per argument on hot path."""
+        fn_id = slot.fn_id
+
+        meta = self._handlers.get(fn_id)
+        if meta is None:
+            return TaskResult(success=False, error=f"Unknown fn_id {fn_id:#06x}")
+
         try:
-            return handler(slot, ctx)
+            args = meta.unpack_fn(slot.args)
+            result = meta.handler(*args)
+            # Auto-wrap plain returns into TaskResult
+            if isinstance(result, TaskResult):
+                return result
+            return TaskResult(success=True, value=result)
         except Exception as e:
             return TaskResult(success=False, error=str(e))
