@@ -1,65 +1,46 @@
 #!/usr/bin/env python3
-import sys
-sys.path.insert(0, '/mnt/project')
+"""Example: typed handlers with pythonic enqueue."""
 
 from api import MpopApi, TaskResult
 
+def multiply(a: int, b: int) -> int:
+    return a * b
 
-# User must define a handler logic
-# Example 1 Multiplication: x*y
-def multiply_handler(slot, ctx):
-    '''Multiply two numbers from slot.args'''
-    a = slot.args[0]
-    b = slot.args[1]
-    result = a * b
-    
-    if ctx.log_func:
-        ctx.log_func(f"{a} * {b} = {result}")
-    
-    return TaskResult(success=True, value=result)
+def power(base: int, exp: int) -> int:
+    return base ** exp
 
-# Example 2: Computing b^exp.
-def power_handler(slot, ctx):
-    '''Raise to power'''
-    base = slot.args[0]
-    exp = slot.args[1]
-    result = base ** exp
-    
-    if ctx.log_func:
-        ctx.log_func(f"{base} ** {exp} = {result}")
-    
-    return TaskResult(success=True, value=result)
+def process(name: str, items: list, scale: float) -> str:
+    return f"{name}: {sum(items) * scale}"
 
-
-# Export handlers
 HANDLERS = {
-    0x8000: multiply_handler,
-    0x8001: power_handler,
+    0x8000: multiply,
+    0x8001: power,
+    0x8002: process,
 }
 
 
-# ============================================================
-# STEP 2: Use with MpopApi
-# ============================================================
-
 if __name__ == "__main__":
-    # Pass this file as handler module
     app = MpopApi(
         workers=4,
         display=True,
         handler_module=__name__,
-        debug_delay=0.05,     # Optional!
+        debug_delay=0.05,
     )
-    
+
+    app.register_handlers(handlers_dict=HANDLERS)
+    app.validate()
+
     print("Enqueueing tasks...")
-    
+
     for i in range(10):
-        app.enqueue(fn_id=0x8000, args=(i, 10), tsk_id=i)
-    
+        app.enqueue(multiply, a=i, b=10, tsk_id=i)
+
     for i in range(2, 6):
         app.enqueue(fn_id=0x8001, args=(i, 3), tsk_id=i + 100)
-    
+
+    app.enqueue(process, name="batch", items=[10, 20, 30], scale=2.5, tsk_id=200)
+
     print("Running workers...")
     app.run()
-    
-    print("\n✅ Done! Custom handlers executed in parallel.")
+
+    print("\nDone!")
