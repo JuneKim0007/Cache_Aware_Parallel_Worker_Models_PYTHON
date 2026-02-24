@@ -1,7 +1,5 @@
 # Mpop — Cache Aware Parallel Worker Models (Python)
 
-**Experimental Version**
-
 Language: Python\
 Requires: Python >= 3.10 (tested on 3.12 and 3.14)\
 Dependencies: psutil
@@ -14,9 +12,6 @@ It does this by packing task data into fixed-size 128-byte slots that sit in sha
 
 The framework uses a typed handler system where all function parameters must have type annotations.\
 Types are inspected once at registration time and pre-compiled into pack/unpack functions, so the hot path during task execution has zero per-argument branching.
-
-This version is an experimental rewrite. The previous version supported legacy untyped handlers and multiple slot sizes; all of that has been removed.\
-Everything is now typed-only dispatch with a single universal 128-byte slot.
 
 ---
 
@@ -64,7 +59,8 @@ DIRECT types (stored in slot, zero overhead):
 REFERENCE types (stored in ArgsPool, retrieved by workers):
  - `str`, `list`, `dict`, `tuple`, `set`, `bytes`, any custom class
 
-The ArgsPool uses lazy initialization. If your handlers only use DIRECT types, no Manager process is ever spawned and there's zero overhead from it.
+The ArgsPool uses lazy initialization.\
+If your handlers only use DIRECT types, no Manager process is ever spawned and there's zero overhead from it.
 
 ---
 
@@ -183,14 +179,13 @@ Workers automatically clean up pool entries after retrieval.
 
 ## Important Notes and Limitations
 
-**This is experimental.** Things work but there are rough edges. Read this section before using.
+**This is experimental.** Things work but there are some fallbacks. Read this section before using.
 
 ### 1. Must run under `if __name__ == "__main__"`
 
 macOS uses the `spawn` start method for multiprocessing. This means the entire module gets re-imported in each child process.\
 If `MpopApi()` is at module level without the guard, child processes will re-create it and you get an infinite spawn loop.
 
-This is not mpop-specific, its a Python multiprocessing thing on macOS.\
 Linux uses `fork` so it generally works without the guard, but you should always use it anyway.
 
 ### 2. Handlers must exist before enqueue and run
@@ -208,7 +203,7 @@ If you enqueue a task with an fn_id that workers dont know about, you'll see `[E
 
 No exceptions. If even one parameter is missing a type hint, registration will fail with `TypeResolutionError`.
 
-This is intentional — the type system compiles pack/unpack at registration and needs to know every parameter's type.
+This is intentional: the type system compiles pack/unpack at registration and needs to know every parameter's type.
 
 ```python
 # Good
@@ -228,19 +223,14 @@ If you need more arguments, pack related data into a dict or list (those go thro
 ### 5. ArgsPool overhead for REFERENCE types
 
 REFERENCE types (`str`, `list`, `dict`, etc.) require inter-process communication through `multiprocessing.Manager`.\
-This is noticeably slower than DIRECT types which just get packed into the slot.
 
 For performance critical paths, try to stick to `int`, `float`, `bool` parameters when possible.
 
 The Manager is lazily initialized — it only starts when you first enqueue a task with REFERENCE type argument. If you never use REFERENCE types, no Manager process is created.
 
-### 6. Python 3.14 annotation changes
+### 6. Return values are not collected
 
-Python 3.14 changed how annotations work (PEP 749). The type resolver has multiple fallback chains to handle this, but if you run into issues with type resolution on 3.14, try using explicit type hints instead of relying on `from __future__ import annotations`.
-
-### 7. Return values are not collected
-
-Handlers can return values and they get wrapped into `TaskResult` internally. But there is currently no mechanism to send results back to the main process. Return values exist mainly for error handling — if a handler raises, the worker logs it and continues.
+Handlers can return values and they get wrapped into `TaskResult` internally. But there is currently no mechanism to send results back to the main process. Return values exist mainly for error handling; if a handler raises, the worker logs it and continues.
 
 ```python
 # Both work fine
@@ -252,7 +242,7 @@ def add_v2(a: int, b: int):
     return TaskResult(success=True, value=result)
 ```
 
-### 8. handler_module vs handlers_map
+### 7. handler_module vs handlers_map
 
 There are two ways handlers reach worker processes:
 
@@ -314,8 +304,3 @@ api/
  - Supervisor Recovery: Reconnecting a new supervisor with existing workers after failure. This has been challenging because recovery requires reliable method to re-link the supervisor with workers which introduces coordination and state-reconciliation problems.
  - Meta Data: Building the 32B meta section to support timestamping, flexible logging levels
  - Benchmarking: Comparative analysis against multiprocessing.Pool and concurrent.futures
-## Road Map
-- Argument Pool: Implementing a pool for storing lengthy arguments and user-facing functions for integrating handler validation and creating a registry.
-- Meta Data: Building a meta section to support timestamping, flexible logging such as no log, detailed log, and better control.
-- Error Recovery: Handling worker failures, health check, respawning.
-- Supervisor Recovery: Implementing mechanisms to respawn and reconnect the supervisor process after failure.
