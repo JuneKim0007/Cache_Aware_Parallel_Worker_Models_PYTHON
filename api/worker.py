@@ -1,20 +1,55 @@
 # ============================================================
-# API/WORKER.PY
+# API/WORKER.PY — Worker process entry
 # ============================================================
-# Worker process entry and status structures.
+# SharedMemory ownership model:
+#   SUPERVISOR creates segments  → owns → close + unlink
+#   WORKERS    attach segments   → borrow → untrack + close only
+#
+# Workers call _untrack_shm() immediately after attaching.
+# This prevents:
+#   1. resource_tracker "leaked shared_memory" warnings
+#   2. __del__ trying to close buffers with live ctypes views
+#   3. Worker accidentally unlinking segments it doesn't own
 # ============================================================
 
 import os
 import sys
+import gc
 import ctypes
 import time
+import inspect
 import warnings
+from multiprocessing import Lock, Queue
 from multiprocessing.shared_memory import SharedMemory
 
-from .slot import ProcTaskFnID, SLOT_CLASS_MAP
-from .config import SyncGroup, SharedRefs
+from .slot import TaskSlot, ProcTaskFnID, SLOT_SIZE
 from .queues import SharedQueueState, LocalTaskQueue
-from .tasks import TaskDispatcher, TaskContext
+from .tasks import TaskDispatcher, TaskResult
+from .types import resolve_handler, HandlerMeta
+
+
+# ============================================================
+# SHARED MEMORY ATTACH (untracked)
+# ============================================================
+def _attach_shm_untracked(name):
+    """Attach to existing SharedMemory WITHOUT registering with resource_tracker.
+    
+    Workers don't own segments — supervisor handles unlink.
+    By preventing registration, we avoid:
+      - resource_tracker "leaked" warnings at worker exit
+      - Double-unregister KeyError (worker untrack + supervisor unlink)
+      - __del__ calling close() on tracked segments during GC
+      
+    Works on both fork (shared tracker) and spawn (separate tracker).
+    """
+    import multiprocessing.resource_tracker as _rt
+    _orig_register = _rt.register
+    _rt.register = lambda *a, **kw: None  # no-op during attach
+    try:
+        shm = SharedMemory(name=name, create=False)
+    finally:
+        _rt.register = _orig_register  # restore immediately
+    return shm
 
 
 # ============================================================
@@ -23,27 +58,25 @@ from .tasks import TaskDispatcher, TaskContext
 class WorkerStatusStruct(ctypes.Structure):
     _pack_ = 1
     _fields_ = [
-        ("state", ctypes.c_uint8),
-        ("_pad0", ctypes.c_uint8 * 3),
+        ("state",             ctypes.c_uint8),
+        ("_pad0",             ctypes.c_uint8 * 3),
         ("local_queue_count", ctypes.c_uint32),
-        ("completed_tasks", ctypes.c_uint32),
-        ("_padding", ctypes.c_uint8 * 52),
+        ("completed_tasks",   ctypes.c_uint32),
+        ("_padding",          ctypes.c_uint8 * 52),
     ]
 
 WORKER_STATUS_SIZE = ctypes.sizeof(WorkerStatusStruct)
-STATUS_ARRAY_TYPE = WorkerStatusStruct * 64
-STATUS_ARRAY_SIZE = WORKER_STATUS_SIZE * 64
 
-STATE_INIT = 0
-STATE_RUNNING = 1
-STATE_IDLE = 2
+STATE_INIT       = 0
+STATE_RUNNING    = 1
+STATE_IDLE       = 2
 STATE_TERMINATED = 3
 
 STATE_NAMES = {
-    STATE_INIT: "INIT",
-    STATE_RUNNING: "RUNNING",
-    STATE_IDLE: "IDLE",
-    STATE_TERMINATED: "TERMINATED"
+    STATE_INIT:       "INIT",
+    STATE_RUNNING:    "RUNNING",
+    STATE_IDLE:       "IDLE",
+    STATE_TERMINATED: "TERMINATED",
 }
 
 
@@ -51,41 +84,115 @@ STATE_NAMES = {
 # WORKER CONTEXT
 # ============================================================
 class WorkerContext:
-    """Picklable context shipped to each worker process.
-
-    Fields:
-        worker_id, consumer_id  → identity
-        shared_refs             → SharedRefs  (shm names for attachment)
-        cfg                     → MpopConfig  (slot, queue_slots, worker config)
-        sync                    → SyncGroup   (lock, batch_lock, log_queue)
-
-    Worker reads:
-        cfg.slot         → SlotConfig  (slot class + metadata)
-        cfg.queue_slots  → int         (shared queue capacity)
-        cfg.worker       → WorkerConfig(batch_size, admin_freq, delay, handler, supervisor_pid)
-    """
     __slots__ = (
         "worker_id", "consumer_id",
-        "shared_refs", "cfg", "sync",
+        "shm_slots_name", "shm_state_name", "shm_status_name",
+        "_num_slots", "lock", "batch_lock", "log_queue",
+        "supervisor_pid", "debug_task_delay",
+        "admin_frequency", "handler_module",
+        "worker_batch_size", "pool_proxy",
+        "handlers_map",
     )
 
-    def __init__(self,
-                 worker_id: int,
-                 consumer_id: int,
-                 shared_refs: SharedRefs,
-                 cfg,
-                 sync: SyncGroup):
+    def __init__(self, worker_id, consumer_id,
+                 shm_slots_name, shm_state_name, shm_status_name,
+                 _num_slots, lock, batch_lock, log_queue,
+                 supervisor_pid=0, debug_task_delay=0.0,
+                 admin_frequency=5, handler_module=None,
+                 worker_batch_size=256, pool_proxy=None,
+                 handlers_map=None):
         self.worker_id = worker_id
         self.consumer_id = consumer_id
-        self.shared_refs = shared_refs
-        self.cfg = cfg
-        self.sync = sync
+        self.shm_slots_name = shm_slots_name
+        self.shm_state_name = shm_state_name
+        self.shm_status_name = shm_status_name
+        self._num_slots = _num_slots
+        self.lock = lock
+        self.batch_lock = batch_lock
+        self.log_queue = log_queue
+        self.supervisor_pid = supervisor_pid
+        self.debug_task_delay = debug_task_delay
+        self.admin_frequency = admin_frequency
+        self.handler_module = handler_module
+        self.worker_batch_size = worker_batch_size
+        self.pool_proxy = pool_proxy
+        self.handlers_map = handlers_map
+
+
+# ============================================================
+# WORKER-LOCAL POOL WRAPPER
+# ============================================================
+class _WorkerPoolProxy:
+    """Lightweight pool wrapper for worker processes.
+    store() raises — workers only retrieve and remove."""
+    __slots__ = ("_proxy",)
+
+    def __init__(self, proxy):
+        self._proxy = proxy
+
+    def store(self, data):
+        raise RuntimeError("Workers should not store to ArgsPool")
+
+    def retrieve(self, pool_id):
+        return self._proxy.get(pool_id)
+
+    def remove(self, pool_id):
+        try:
+            del self._proxy[pool_id]
+        except KeyError:
+            pass
+
+
+# ============================================================
+# HANDLER LOADING — typed only
+# ============================================================
+def _load_from_map(handlers_map, dispatcher, pool_wrapper, log_queue, worker_id):
+    """Load handlers from directly-passed map (from @app.task registration)."""
+    loaded = 0
+    for fn_id, handler in handlers_map.items():
+        try:
+            specs = resolve_handler(handler)
+            meta = HandlerMeta(
+                fn_id=fn_id, name=handler.__name__,
+                handler=handler, specs=specs, pool=pool_wrapper,
+            )
+            dispatcher.register(meta)
+            loaded += 1
+        except Exception as e:
+            log_queue.put((worker_id,
+                f"[Error] Cannot resolve {handler.__name__} "
+                f"({fn_id:#06x}): {e}"))
+    return loaded
+
+
+def _load_from_module(mod, dispatcher, pool_wrapper, log_queue, worker_id):
+    """Load handlers from module's HANDLERS dict."""
+    if not hasattr(mod, 'HANDLERS'):
+        return 0
+
+    loaded = 0
+    for fn_id, handler in mod.HANDLERS.items():
+        if dispatcher._handlers.get(fn_id) is not None:
+            continue
+        try:
+            specs = resolve_handler(handler)
+            meta = HandlerMeta(
+                fn_id=fn_id, name=handler.__name__,
+                handler=handler, specs=specs, pool=pool_wrapper,
+            )
+            dispatcher.register(meta)
+            loaded += 1
+        except Exception as e:
+            log_queue.put((worker_id,
+                f"[Error] Cannot resolve {handler.__name__} "
+                f"({fn_id:#06x}): {e}. SKIPPED."))
+    return loaded
 
 
 # ============================================================
 # SUPERVISOR CHECK
 # ============================================================
-def is_supervisor_alive(pid: int) -> bool:
+def is_supervisor_alive(pid):
     if pid <= 0:
         return True
     try:
@@ -96,147 +203,95 @@ def is_supervisor_alive(pid: int) -> bool:
 
 
 # ============================================================
-# HANDLER LOADING
-# ============================================================
-def _load_handlers(dispatcher: TaskDispatcher, handler_module: str, log_queue, worker_id: int):
-    """Load user handlers into dispatcher. Cold-path, runs once per worker."""
-    if not handler_module:
-        return
-    try:
-        import importlib
-        mod = importlib.import_module(handler_module)
-
-        if hasattr(mod, 'HANDLERS'):
-            for fn_id, handler in mod.HANDLERS.items():
-                dispatcher.register(fn_id, handler)
-            log_queue.put((worker_id, f"Loaded {len(mod.HANDLERS)} handlers from {handler_module}"))
-        elif hasattr(mod, 'register_handlers'):
-            mod.register_handlers(dispatcher)
-            log_queue.put((worker_id, f"Registered handlers via {handler_module}.register_handlers()"))
-        else:
-            log_queue.put((-1, f"[Warning] {handler_module} has no HANDLERS dict or register_handlers()"))
-    except Exception as e:
-        log_queue.put((-1, f"[Error] Failed to load {handler_module}: {e}"))
-
-
-# ============================================================
-# SHARED MEMORY ATTACHMENT
-# ============================================================
-def _attach_shared_memory(shared_refs, slot_cfg, num_slots):
-    """Attach to all shared memory segments.
-    Returns (shm_slots, shm_state, shm_status, slots, state, status_array).
-    """
-    shm_slots = SharedMemory(name=shared_refs.slots_name)
-    shm_state = SharedMemory(name=shared_refs.state_name)
-    shm_status = SharedMemory(name=shared_refs.status_name)
-
-    slot_class = slot_cfg.cls
-    if slot_class is None:
-        slot_class = SLOT_CLASS_MAP.get(slot_cfg.cls_name)
-
-    SlotArray = slot_class * num_slots
-    slots = SlotArray.from_buffer(shm_slots.buf)
-    state = SharedQueueState.from_buffer(shm_state.buf)
-
-    status_array = STATUS_ARRAY_TYPE.from_buffer(shm_status.buf)
-
-    return shm_slots, shm_state, shm_status, slots, state, status_array
-
-
-# ============================================================
-# SHARED MEMORY DETACH (worker-side cleanup)
-# ============================================================
-def _detach_shared_memory(slots, state, status_array, my_status,
-                          shm_slots, shm_state, shm_status):
-    """Release buffer references and close (NOT unlink) shared memory."""
-    del slots
-    del state
-    del status_array
-    del my_status
-
-    for shm in (shm_slots, shm_state, shm_status):
-        try:
-            shm.close()
-        except Exception:
-            pass
-
-    try:
-        sys.stderr = open(os.devnull, 'w')
-    except Exception:
-        pass
-
-
-# ============================================================
 # WORKER PROCESS ENTRY
 # ============================================================
 def worker_process_entry(ctx: WorkerContext):
     warnings.filterwarnings("ignore", category=UserWarning)
 
-    # ---- Unpack from MpopConfig into locals for hot-path ----
-    worker_id = ctx.worker_id
-    consumer_id = ctx.consumer_id
-    slot_cfg = ctx.cfg.slot
-    wc = ctx.cfg.worker
-    supervisor_pid = wc.supervisor_pid
-    lock = ctx.sync.lock
-    batch_lock = ctx.sync.batch_lock
-    log_queue = ctx.sync.log_queue
+    supervisor_pid = ctx.supervisor_pid
 
-    # ---- Attach shared memory ----
+    # ---- ATTACH SHARED MEMORY (untracked — supervisor owns these) ----
+    shm_slots = shm_state = shm_status = None
     try:
-        (shm_slots, shm_state, shm_status,
-         slots, state, status_array) = _attach_shared_memory(
-            ctx.shared_refs, slot_cfg, ctx.cfg.queue_slots
-        )
+        shm_slots  = _attach_shm_untracked(ctx.shm_slots_name)
+        shm_state  = _attach_shm_untracked(ctx.shm_state_name)
+        shm_status = _attach_shm_untracked(ctx.shm_status_name)
     except Exception as e:
-        log_queue.put((-1, f"[Error][Worker] Worker {worker_id} attach failed: {e}"))
+        ctx.log_queue.put((-1, f"[Error][Worker] Worker {ctx.worker_id} attach failed: {e}"))
         return
 
-    my_status = status_array[consumer_id]
+    # ---- CREATE CTYPES VIEWS ----
+    SlotArray = TaskSlot * ctx._num_slots
+    slots = SlotArray.from_buffer(shm_slots.buf)
+    state = SharedQueueState.from_buffer(shm_state.buf)
+
+    StatusArray = WorkerStatusStruct * 64
+    status_array = StatusArray.from_buffer(shm_status.buf)
+    my_status = status_array[ctx.consumer_id]
+
     my_status.state = STATE_RUNNING
     my_status.local_queue_count = 0
     my_status.completed_tasks = 0
 
-    # ---- Local queue & dispatcher ----
-    max_batch = wc.batch_size
-    local_queue = LocalTaskQueue(num_slots=max_batch, slot_cfg=slot_cfg)
+    max_batch = ctx.worker_batch_size
+    local_queue = LocalTaskQueue(_num_slots=max_batch)
 
     dispatcher = TaskDispatcher()
-    _load_handlers(dispatcher, wc.handler_module, log_queue, worker_id)
 
-    # ---- Admin & logging helpers ----
+    # ---- LOAD HANDLERS ----
+    pool_wrapper = _WorkerPoolProxy(ctx.pool_proxy) if ctx.pool_proxy else None
+    handler_count = 0
+
+    if ctx.handlers_map:
+        handler_count += _load_from_map(
+            ctx.handlers_map, dispatcher, pool_wrapper,
+            ctx.log_queue, ctx.worker_id)
+
+    if ctx.handler_module:
+        try:
+            import importlib
+            mod = importlib.import_module(ctx.handler_module)
+            handler_count += _load_from_module(
+                mod, dispatcher, pool_wrapper,
+                ctx.log_queue, ctx.worker_id)
+        except Exception as e:
+            ctx.log_queue.put((-1, f"[Error] Failed to load {ctx.handler_module}: {e}"))
+
+    ctx.log_queue.put((ctx.worker_id, f"Loaded {handler_count} handlers"))
+
+    # ---- ADMIN/LOG HELPERS ----
     tasks_since_admin = 0
-    admin_freq = wc.admin_frequency
+    admin_freq = ctx.admin_frequency
 
-    def do_admin_check() -> bool:
+    def do_admin_check():
         nonlocal tasks_since_admin
         tasks_since_admin = 0
         if not is_supervisor_alive(supervisor_pid):
-            log_queue.put((worker_id, "Supervisor dead"))
+            ctx.log_queue.put((ctx.worker_id, "Supervisor dead"))
             return False
         return True
 
-    def throttled_log(msg: str):
+    def throttled_log(msg):
         nonlocal tasks_since_admin
         tasks_since_admin += 1
         if tasks_since_admin >= admin_freq:
-            log_queue.put((worker_id, msg))
+            ctx.log_queue.put((ctx.worker_id, msg))
             do_admin_check()
 
-    task_ctx = TaskContext(worker_id=worker_id, log_func=throttled_log, extra={})
-
-    # ---- Hot-path locals ----
-    task_delay = wc.debug_task_delay
-    consumer_bit = 1 << consumer_id
+    task_delay = ctx.debug_task_delay
+    consumer_bit = 1 << ctx.consumer_id
     running = True
     idle_count = 0
 
+    # ============================================================
+    # MAIN LOOP
+    # ============================================================
     while running:
         batch_size = 0
         batch_head = 0
 
-#### THE BELOW BATCH LOGIC IS INTERNAL USE AND HAS TESTED OUT SO PLEASE DONT CHANGE
-        with lock:
+        #### BATCH LOGIC — INTERNAL, TESTED — DO NOT CHANGE ####
+        with ctx.lock:
             available = (state.tail - state.head) & state.mask
             if available > 0:
                 batch_size = min(available, max_batch)
@@ -252,7 +307,7 @@ def worker_process_entry(ctx: WorkerContext):
 
             if idle_count % 100 == 0:
                 if not is_supervisor_alive(supervisor_pid):
-                    log_queue.put((worker_id, "Supervisor dead"))
+                    ctx.log_queue.put((ctx.worker_id, "Supervisor dead"))
                     running = False
                     break
 
@@ -277,43 +332,65 @@ def worker_process_entry(ctx: WorkerContext):
             if slot.fn_id == ProcTaskFnID.TERMINATE:
                 running = False
                 my_status.completed_tasks += 1
-                log_queue.put((worker_id, f"TERMINATE tsk_id={slot.tsk_id}"))
+                ctx.log_queue.put((ctx.worker_id, f"TERMINATE tsk_id={slot.tsk_id}"))
                 continue
 
             if task_delay > 0:
                 time.sleep(task_delay)
 
-            result = dispatcher.dispatch(slot, task_ctx)
+            result = dispatcher.dispatch(slot)
             my_status.completed_tasks += 1
 
             if slot.fn_id == ProcTaskFnID.INCREMENT:
-                with lock:
+                with ctx.lock:
                     state.debug_counter += 1
 
             if not result.success:
-                log_queue.put((worker_id, f"[Error] tsk_id={slot.tsk_id}: {result.error}"))
+                ctx.log_queue.put((ctx.worker_id, f"[Error] tsk_id={slot.tsk_id}: {result.error}"))
 
         my_status.local_queue_count = 0
 
         bitmap_zero = False
-        with lock:
+        with ctx.lock:
             state.active_batches &= ~consumer_bit
             bitmap_zero = (state.active_batches == 0)
 
         if bitmap_zero:
-            with batch_lock:
+            with ctx.batch_lock:
                 state.committed_accumulation += state.batch_accumulation_counter
                 state.batch_accumulation_counter = 0
                 state.num_batch_participants = 0
                 state.is_committed = 1
-#### THE ABOVE BATCH LOGIC IS INTERNAL USE AND HAS TESTED OUT SO PLEASE DONT CHANGE
+        #### END BATCH LOGIC ####
 
+    # ============================================================
+    # CLEANUP
+    # ============================================================
+    # Mark terminated (still writing to shm — views alive)
     my_status.state = STATE_TERMINATED
 
-    with lock:
+    with ctx.lock:
         state.available_consumer_ids |= consumer_bit
         if state.active_worker_count > 0:
             state.active_worker_count -= 1
 
-    _detach_shared_memory(slots, state, status_array, my_status,
-                          shm_slots, shm_state, shm_status)
+    # Release all ctypes views BEFORE closing shm
+    del slots
+    del state
+    del status_array
+    del my_status
+    del local_queue
+
+    # Force GC to drop internal buffer references from ctypes
+    gc.collect()
+
+    # Close shm handles. Since we untracked, __del__ is a no-op.
+    # Supervisor will unlink after all workers have joined.
+    for shm in (shm_slots, shm_state, shm_status):
+        if shm is not None:
+            try:
+                shm.close()
+            except BufferError:
+                pass  # rare: ctypes ref survived GC — harmless, supervisor will unlink
+            except Exception:
+                pass
